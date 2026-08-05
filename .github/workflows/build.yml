@@ -22,7 +22,7 @@ jobs:
     # Установка GLFW через vcpkg (который предустановлен на windows-latest)
     - name: Install GLFW via Vcpkg
       run: |
-        vcpkg install glfw3:x64-windows
+        vcpkg install glfw3:x64-windows-static-md
 
     # Автоматическое скачивание wintun.dll прямо в ходе сборки
     - name: Download Wintun DLL
@@ -38,7 +38,7 @@ jobs:
         cmake -B build -S . `
           -DCMAKE_BUILD_TYPE=Release `
           -DCMAKE_TOOLCHAIN_FILE="C:/vcpkg/scripts/buildsystems/vcpkg.cmake" `
-          -DVCPKG_TARGET_TRIPLET="x64-windows"
+          -DVCPKG_TARGET_TRIPLET="x64-windows-static-md"
 
     # Сборка проекта в режиме Release
     - name: Build Project

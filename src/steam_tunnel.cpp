@@ -207,14 +207,22 @@ void SteamVpnTunnel::Tick() {
 
     if (m_state != TunnelState::Connected && !m_isHost) return;
 
-    // ШАГ 2: Чтение IP-пакетов из Wintun и пересылка в Steam без лишних выделений памяти
+    // ШАГ 2: Чтение IP-пакетов из Wintun Хоста и адресная пересылка в Steam
     m_packetBuffer.clear();
     while (m_wintun.ReceivePacket(m_packetBuffer)) {
         if (m_isHost) {
+            // 19-й байт в IPv4 заголовке — это последний октет Destination IP (192.168.137.X)
+            uint8_t destOctet = (m_packetBuffer.size() >= 20) ? m_packetBuffer[19] : 255;
+
             for (const auto& peer : m_peers) {
-                SteamNetworkingSockets()->SendMessageToConnection(
-                    peer.hConn, m_packetBuffer.data(), static_cast<uint32_t>(m_packetBuffer.size()),
-                    k_nSteamNetworkingSend_UnreliableNoDelay, nullptr);
+                // Отправляем только адресату ИЛИ всем, если это Broadcast (.255)
+                if (destOctet == 255 || peer.lastOctet == destOctet) {
+                    SteamNetworkingSockets()->SendMessageToConnection(
+                        peer.hConn, m_packetBuffer.data(), static_cast<uint32_t>(m_packetBuffer.size()),
+                        k_nSteamNetworkingSend_UnreliableNoDelay, nullptr);
+
+                    if (destOctet != 255) break; // Точечный адресат найден — прерываем цикл
+                }
             }
         } else if (m_isClient && m_hostConn != k_HSteamNetConnection_Invalid) {
             SteamNetworkingSockets()->SendMessageToConnection(
@@ -224,17 +232,44 @@ void SteamVpnTunnel::Tick() {
         m_packetBuffer.clear();
     }
 
-    // ШАГ 3: Чтение P2P-кадров из Steam PollGroup и запись напрямую в Wintun
+    // ШАГ 3: Чтение P2P-кадров из Steam PollGroup + Коммутация Клиент <-> Клиент
     if (m_hPollGroup != k_HSteamNetPollGroup_Invalid) {
         SteamNetworkingMessage_t* pMsgs[32];
         int numMsgs = SteamNetworkingSockets()->ReceiveMessagesOnPollGroup(m_hPollGroup, pMsgs, 32);
         for (int i = 0; i < numMsgs; ++i) {
-            m_wintun.SendPacket(pMsgs[i]->m_pData, pMsgs[i]->m_cbSize);
+            uint8_t* data = static_cast<uint8_t*>(pMsgs[i]->m_pData);
+            size_t size = pMsgs[i]->m_cbSize;
+
+            if (m_isHost && size >= 20 && (data[0] >> 4) == 4) { // Проверка IPv4
+                uint8_t destOctet = data[19];
+
+                if (destOctet == 1 || destOctet == 255) {
+                    // Пакет предназначен Хосту или всем — отсылаем в Wintun Хоста
+                    m_wintun.SendPacket(data, size);
+                }
+                
+                // Если пакет идет от Клиента к другому Клиенту — пересылаем его напрямую!
+                if (destOctet != 1) {
+                    for (const auto& peer : m_peers) {
+                        if (peer.lastOctet == destOctet || destOctet == 255) {
+                            SteamNetworkingSockets()->SendMessageToConnection(
+                                peer.hConn, data, static_cast<uint32_t>(size),
+                                k_nSteamNetworkingSend_UnreliableNoDelay, nullptr);
+
+                            if (destOctet != 255) break;
+                        }
+                    }
+                }
+            } else {
+                // На Клиенте — просто пишем пришедший кадр в Wintun
+                m_wintun.SendPacket(data, size);
+            }
+
             pMsgs[i]->Release();
         }
     }
 
-    // Троттлинг обновления сетевой метрики Ping RTT (выполняется 1 раз в секунду)
+    // Троттлинг обновления сетевой метрики Ping RTT (1 раз в секунду)
     double currentTime = GetCurrentTimeSeconds();
     if (currentTime - m_lastPingUpdateTime >= 1.0) {
         m_lastPingUpdateTime = currentTime;

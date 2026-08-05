@@ -8,7 +8,10 @@ if(NOT MSVC)
     message(FATAL_ERROR "Данный проект предназначен для сборки через MSVC под Windows.")
 endif()
 
-# Если триплет не задан извне (например, при локальной сборке), задаем static-md
+# Опция /utf-8 для корректной сборки кириллических строк в MSVC
+add_compile_options(/utf-8)
+
+# Если триплет не задан извне, используем static-md для статической линковки GLFW
 if(NOT DEFINED VCPKG_TARGET_TRIPLET)
     set(VCPKG_TARGET_TRIPLET "x64-windows-static-md" CACHE STRING "")
 endif()
@@ -39,7 +42,7 @@ add_executable(${PROJECT_NAME} WIN32
     ${IMGUI_SOURCES}
 )
 
-# Фикс WinMain точки входа для оконного приложения
+# Настройка точки входа mainCRTStartup для сохранения int main() в оконном режиме WIN32
 set_target_properties(${PROJECT_NAME} PROPERTIES LINK_FLAGS "/ENTRY:mainCRTStartup")
 
 target_include_directories(${PROJECT_NAME} PRIVATE

@@ -54,7 +54,7 @@ int main(int argc, char** argv) {
     }
 
     SteamNetworkingUtils()->SetGlobalConfigValuePtr(
-        k_ESteamNetworkingUtilsConfig_Callback_ConnectionStatusChanged,
+        k_ESteamNetworkingConfig_Callback_ConnectionStatusChanged,
         (void*)SteamVpnTunnel::OnSteamNetConnectionStatusChanged
     );
 

@@ -54,15 +54,18 @@ int main(int argc, char** argv) {
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 330");
 
-    SteamErrMsg errMsg;
-    if (SteamAPI_InitEx(&errMsg) != k_ESteamAPIInitResult_OK) {
+    // Инициализация Steam API с проверкой
+    SteamErrMsg errMsg = {0};
+    bool steamInitialized = (SteamAPI_InitEx(&errMsg) == k_ESteamAPIInitResult_OK);
+
+    if (steamInitialized && SteamNetworkingUtils()) {
+        SteamNetworkingUtils()->SetGlobalConfigValuePtr(
+            k_ESteamNetworkingConfig_Callback_ConnectionStatusChanged,
+            (void*)SteamVpnTunnel::OnSteamNetConnectionStatusChanged
+        );
+    } else {
         std::cerr << "[SteamAPI] Ошибка инициализации: " << errMsg << "\n";
     }
-
-    SteamNetworkingUtils()->SetGlobalConfigValuePtr(
-        k_ESteamNetworkingConfig_Callback_ConnectionStatusChanged,
-        (void*)SteamVpnTunnel::OnSteamNetConnectionStatusChanged
-    );
 
     SteamVpnTunnel tunnel;
     char targetSteamIDBuf[64] = "";
@@ -70,8 +73,10 @@ int main(int argc, char** argv) {
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
 
-        // Единый опрос кадра
-        tunnel.Tick();
+        // Безопасный вызов сетевого цикла кадра
+        if (steamInitialized) {
+            tunnel.Tick();
+        }
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
@@ -81,12 +86,17 @@ int main(int argc, char** argv) {
         ImGui::SetNextWindowSize(io.DisplaySize);
         ImGui::Begin("Steam P2P VPN Panel", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar);
 
-        if (SteamUser()) {
+        if (steamInitialized && SteamUser()) {
             CSteamID myID = SteamUser()->GetSteamID();
             const char* myName = SteamFriends() ? SteamFriends()->GetPersonaName() : "Unknown";
             ImGui::Text("Профиль Steam: %s (ID: %llu)", myName, myID.ConvertToUint64());
         } else {
-            ImGui::TextColored(ImVec4(1.0f, 0.0f, 0.0f, 1.0f), "Steam API не активен!");
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
+            ImGui::Text("Steam API не активен! Убедитесь, что клиент Steam запущен.");
+            if (errMsg[0] != '\0') {
+                ImGui::Text("Детали: %s", errMsg);
+            }
+            ImGui::PopStyleColor();
         }
 
         ImGui::Separator();
@@ -102,6 +112,9 @@ int main(int argc, char** argv) {
                 ImGui::Separator();
             }
 
+            // Блокируем кнопки, если Steam API выключен
+            if (!steamInitialized) ImGui::BeginDisabled();
+
             if (ImGui::Button("Запустить сеть (Хост - 192.168.137.1)", ImVec2(340, 30))) {
                 tunnel.InitHost("192.168.137.1");
             }
@@ -112,6 +125,8 @@ int main(int argc, char** argv) {
                 uint64_t targetID = std::strtoull(targetSteamIDBuf, nullptr, 10);
                 tunnel.InitClient(targetID, "192.168.137.2");
             }
+
+            if (!steamInitialized) ImGui::EndDisabled();
         }
         else if (state == TunnelState::Connecting) {
             ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "Подключение к %llu...", tunnel.GetTargetSteamID());
@@ -165,7 +180,10 @@ int main(int argc, char** argv) {
     }
 
     tunnel.Shutdown();
-    SteamAPI_Shutdown();
+
+    if (steamInitialized) {
+        SteamAPI_Shutdown();
+    }
 
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();

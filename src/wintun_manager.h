@@ -2,6 +2,9 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <ws2tcpip.h>
+#include <iphlpapi.h>
+#include <netioapi.h>
 #include <string>
 #include <vector>
 #include <cstdint>
@@ -12,6 +15,7 @@ typedef void* WINTUN_SESSION_HANDLE;
 typedef WINTUN_ADAPTER_HANDLE(WINAPI* WINTUN_CREATE_ADAPTER_FUNC)(PCWSTR Name, PCWSTR TunnelType, const GUID* RequestedGUID);
 typedef WINTUN_ADAPTER_HANDLE(WINAPI* WINTUN_OPEN_ADAPTER_FUNC)(PCWSTR Name);
 typedef VOID(WINAPI* WINTUN_CLOSE_ADAPTER_FUNC)(WINTUN_ADAPTER_HANDLE Adapter);
+typedef VOID(WINAPI* WINTUN_GET_ADAPTER_LUID_FUNC)(WINTUN_ADAPTER_HANDLE Adapter, NET_LUID* Luid);
 typedef WINTUN_SESSION_HANDLE(WINAPI* WINTUN_START_SESSION_FUNC)(WINTUN_ADAPTER_HANDLE Adapter, DWORD Capacity);
 typedef VOID(WINAPI* WINTUN_END_SESSION_FUNC)(WINTUN_SESSION_HANDLE Session);
 typedef HANDLE(WINAPI* WINTUN_GET_READ_WAIT_EVENT_FUNC)(WINTUN_SESSION_HANDLE Session);
@@ -35,7 +39,7 @@ public:
     bool IsInitialized() const { return m_Session != nullptr; }
 
 private:
-    void ExecuteSilentCmd(const std::wstring& cmd);
+    bool SetAdapterIPAndMTU(NET_LUID luid, const std::string& ipAddress, uint32_t mtu);
 
     HMODULE m_hWintunDll = nullptr;
     WINTUN_ADAPTER_HANDLE m_Adapter = nullptr;
@@ -44,6 +48,7 @@ private:
     WINTUN_CREATE_ADAPTER_FUNC pfnWintunCreateAdapter = nullptr;
     WINTUN_OPEN_ADAPTER_FUNC pfnWintunOpenAdapter = nullptr;
     WINTUN_CLOSE_ADAPTER_FUNC pfnWintunCloseAdapter = nullptr;
+    WINTUN_GET_ADAPTER_LUID_FUNC pfnWintunGetAdapterLUID = nullptr;
     WINTUN_START_SESSION_FUNC pfnWintunStartSession = nullptr;
     WINTUN_END_SESSION_FUNC pfnWintunEndSession = nullptr;
     WINTUN_GET_READ_WAIT_EVENT_FUNC pfnWintunGetReadWaitEvent = nullptr;

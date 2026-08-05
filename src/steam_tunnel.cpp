@@ -51,8 +51,15 @@ void SteamVpnTunnel::HandleConnectionStatusChanged(SteamNetConnectionStatusChang
         peer.pingMs = 0;
 
         if (m_isHost) {
-            int nextOctet = 2 + static_cast<int>(m_peers.size());
-            peer.virtualIP = "192.168.137." + std::to_string(nextOctet);
+            // Поиск минимального свободного октета начиная с .2
+            int freeOctet = 2;
+            while (std::any_of(m_peers.begin(), m_peers.end(), [freeOctet](const ConnectedPeer& p) {
+                return p.virtualIP == ("192.168.137." + std::to_string(freeOctet));
+            })) {
+                freeOctet++;
+            }
+
+            peer.virtualIP = "192.168.137." + std::to_string(freeOctet);
             m_peers.push_back(peer);
         } else if (m_isClient && pInfo->m_hConn == m_hostConn) {
             peer.virtualIP = "192.168.137.1";
@@ -177,10 +184,8 @@ bool SteamVpnTunnel::InitClient(uint64_t targetSteamID, const std::string& virtu
 void SteamVpnTunnel::Tick() {
     if (m_state == TunnelState::Disconnected || !SteamNetworkingSockets()) return;
 
-    // ШАГ 1: Обработка статусов и событий сети Steam
     SteamAPI_RunCallbacks();
 
-    // Таймаут подключения клиентов (15 секунд)
     if (m_isClient && m_state == TunnelState::Connecting) {
         if (GetCurrentTimeSeconds() - m_connectStartTime > 15.0) {
             Shutdown();
@@ -192,7 +197,6 @@ void SteamVpnTunnel::Tick() {
 
     if (m_state != TunnelState::Connected && !m_isHost) return;
 
-    // ШАГ 2: Чтение IP-пакетов из Wintun и отправка в Steam
     std::vector<uint8_t> packetBuffer;
     while (m_wintun.ReceivePacket(packetBuffer)) {
         if (m_isHost) {
@@ -208,7 +212,6 @@ void SteamVpnTunnel::Tick() {
         }
     }
 
-    // ШАГ 3: Чтение P2P-кадров из Steam PollGroup и запись в Wintun
     if (m_hPollGroup != k_HSteamNetPollGroup_Invalid) {
         SteamNetworkingMessage_t* pMsgs[32];
         int numMsgs = SteamNetworkingSockets()->ReceiveMessagesOnPollGroup(m_hPollGroup, pMsgs, 32);
@@ -218,7 +221,6 @@ void SteamVpnTunnel::Tick() {
         }
     }
 
-    // Обновление сетевой метрики Ping RTT
     for (auto& peer : m_peers) {
         SteamNetConnectionRealTimeStatus_t status;
         if (SteamNetworkingSockets()->GetConnectionRealTimeStatus(peer.hConn, &status, 0, nullptr) == k_EResultOK) {

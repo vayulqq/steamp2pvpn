@@ -8,6 +8,13 @@
 #include <vector>
 #include <cstdint>
 
+enum class TunnelState {
+    Disconnected,
+    Connecting,
+    Connected,
+    Failed
+};
+
 struct ConnectedPeer {
     uint64_t steamID = 0;
     std::string virtualIP;
@@ -27,7 +34,11 @@ public:
 
     bool IsHost() const { return m_isHost; }
     bool IsClient() const { return m_isClient; }
-    bool IsActive() const { return m_isHost || m_isClient; }
+    bool IsActive() const { return m_state == TunnelState::Connected || m_state == TunnelState::Connecting || m_isHost; }
+
+    TunnelState GetState() const { return m_state; }
+    const std::string& GetLastError() const { return m_lastError; }
+    uint64_t GetTargetSteamID() const { return m_targetSteamID; }
 
     const std::vector<ConnectedPeer>& GetPeers() const { return m_peers; }
     static void OnSteamNetConnectionStatusChanged(SteamNetConnectionStatusChangedCallback_t* pInfo);
@@ -42,6 +53,11 @@ private:
 
     bool m_isHost = false;
     bool m_isClient = false;
+    TunnelState m_state = TunnelState::Disconnected;
+    std::string m_lastError;
+    uint64_t m_targetSteamID = 0;
+    double m_connectStartTime = 0.0;
+
     std::string m_localVirtualIP;
     std::vector<ConnectedPeer> m_peers;
 

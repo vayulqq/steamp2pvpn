@@ -28,6 +28,8 @@ void SteamVpnTunnel::OnSteamNetConnectionStatusChanged(SteamNetConnectionStatusC
 }
 
 void SteamVpnTunnel::HandleConnectionStatusChanged(SteamNetConnectionStatusChangedCallback_t* pInfo) {
+    if (!pInfo || !SteamNetworkingSockets()) return;
+
     switch (pInfo->m_info.m_eState) {
     case k_ESteamNetworkingConnectionState_Connecting:
     case k_ESteamNetworkingConnectionState_FindingRoute: {
@@ -49,7 +51,6 @@ void SteamVpnTunnel::HandleConnectionStatusChanged(SteamNetConnectionStatusChang
         peer.pingMs = 0;
 
         if (m_isHost) {
-            // Авто-выделение следующего IP: 192.168.137.2, .3, .4 ...
             int nextOctet = 2 + static_cast<int>(m_peers.size());
             peer.virtualIP = "192.168.137." + std::to_string(nextOctet);
             m_peers.push_back(peer);
@@ -102,6 +103,12 @@ bool SteamVpnTunnel::InitHost(const std::string& virtualIP) {
     m_localVirtualIP = virtualIP;
     m_lastError.clear();
 
+    if (!SteamNetworkingSockets()) {
+        m_state = TunnelState::Failed;
+        m_lastError = "Steam API не активен";
+        return false;
+    }
+
     if (!m_wintun.Initialize(L"SteamVpnAdapter", m_localVirtualIP)) {
         m_state = TunnelState::Failed;
         m_lastError = "Не удалось создать Wintun адаптер (запустите от Администратора)";
@@ -128,6 +135,12 @@ bool SteamVpnTunnel::InitClient(uint64_t targetSteamID, const std::string& virtu
     m_localVirtualIP = virtualIP;
     m_targetSteamID = targetSteamID;
     m_lastError.clear();
+
+    if (!SteamNetworkingSockets()) {
+        m_state = TunnelState::Failed;
+        m_lastError = "Steam API не активен";
+        return false;
+    }
 
     if (targetSteamID == 0) {
         m_state = TunnelState::Failed;
@@ -162,7 +175,7 @@ bool SteamVpnTunnel::InitClient(uint64_t targetSteamID, const std::string& virtu
 }
 
 void SteamVpnTunnel::Tick() {
-    if (m_state == TunnelState::Disconnected) return;
+    if (m_state == TunnelState::Disconnected || !SteamNetworkingSockets()) return;
 
     // ШАГ 1: Обработка статусов и событий сети Steam
     SteamAPI_RunCallbacks();
@@ -177,7 +190,6 @@ void SteamVpnTunnel::Tick() {
         }
     }
 
-    // Трафик передаем только при полном установлении связи
     if (m_state != TunnelState::Connected && !m_isHost) return;
 
     // ШАГ 2: Чтение IP-пакетов из Wintun и отправка в Steam
@@ -216,19 +228,21 @@ void SteamVpnTunnel::Tick() {
 }
 
 void SteamVpnTunnel::Shutdown() {
-    if (m_hListenSocket != k_HSteamListenSocket_Invalid) {
-        SteamNetworkingSockets()->CloseListenSocket(m_hListenSocket);
-        m_hListenSocket = k_HSteamListenSocket_Invalid;
-    }
+    if (SteamNetworkingSockets()) {
+        if (m_hListenSocket != k_HSteamListenSocket_Invalid) {
+            SteamNetworkingSockets()->CloseListenSocket(m_hListenSocket);
+            m_hListenSocket = k_HSteamListenSocket_Invalid;
+        }
 
-    if (m_hostConn != k_HSteamNetConnection_Invalid) {
-        SteamNetworkingSockets()->CloseConnection(m_hostConn, 0, nullptr, false);
-        m_hostConn = k_HSteamNetConnection_Invalid;
-    }
+        if (m_hostConn != k_HSteamNetConnection_Invalid) {
+            SteamNetworkingSockets()->CloseConnection(m_hostConn, 0, nullptr, false);
+            m_hostConn = k_HSteamNetConnection_Invalid;
+        }
 
-    if (m_hPollGroup != k_HSteamNetPollGroup_Invalid) {
-        SteamNetworkingSockets()->DestroyPollGroup(m_hPollGroup);
-        m_hPollGroup = k_HSteamNetPollGroup_Invalid;
+        if (m_hPollGroup != k_HSteamNetPollGroup_Invalid) {
+            SteamNetworkingSockets()->DestroyPollGroup(m_hPollGroup);
+            m_hPollGroup = k_HSteamNetPollGroup_Invalid;
+        }
     }
 
     m_peers.clear();

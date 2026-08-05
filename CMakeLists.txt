@@ -8,12 +8,17 @@ if(NOT MSVC)
     message(FATAL_ERROR "Данный проект предназначен для сборки через MSVC под Windows.")
 endif()
 
-# Пути к внешним библиотекам (задайте свои при необходимости)
+# Если триплет не задан извне (например, при локальной сборке), задаем static-md
+if(NOT DEFINED VCPKG_TARGET_TRIPLET)
+    set(VCPKG_TARGET_TRIPLET "x64-windows-static-md" CACHE STRING "")
+endif()
+
+# Пути к внешним библиотекам
 set(STEAMWORKS_SDK_PATH "${CMAKE_CURRENT_SOURCE_DIR}/sdk" CACHE PATH "Path to Steamworks SDK")
 set(IMGUI_PATH "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/imgui" CACHE PATH "Path to Dear ImGui")
 
-# Загрузка GLFW
-find_package(glfw3 REQUIRED)
+# Поиск GLFW (CONFIG режим правильно подтягивает статический таргетинг vcpkg)
+find_package(glfw3 CONFIG REQUIRED)
 
 # Исходные файлы ImGui
 set(IMGUI_SOURCES
@@ -34,6 +39,9 @@ add_executable(${PROJECT_NAME} WIN32
     ${IMGUI_SOURCES}
 )
 
+# Фикс WinMain точки входа для оконного приложения
+set_target_properties(${PROJECT_NAME} PROPERTIES LINK_FLAGS "/ENTRY:mainCRTStartup")
+
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${STEAMWORKS_SDK_PATH}/public
@@ -46,17 +54,16 @@ target_link_directories(${PROJECT_NAME} PRIVATE
 )
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
-    glfw
+    glfw            # Статическая библиотека GLFW от vcpkg
     opengl32.lib
     ws2_32.lib
     iphlpapi.lib
     steam_api64.lib
 )
 
-# Автоматическое копирование системных бинарников
+# Автоматическое копирование steam_api64.dll в папку с .exe
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "${STEAMWORKS_SDK_PATH}/redistributable_bin/win64/steam_api64.dll"
     $<TARGET_FILE_DIR:${PROJECT_NAME}>
 )
-set_target_properties(${PROJECT_NAME} PROPERTIES LINK_FLAGS "/ENTRY:mainCRTStartup")

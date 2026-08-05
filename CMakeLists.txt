@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
-project(SteamP2PVPN CXX)
+# 1. Включаем поддержку языка RC (Resource Compiler)
+project(SteamP2PVPN CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -8,8 +9,9 @@ if(NOT MSVC)
     message(FATAL_ERROR "Данный проект предназначен для сборки через MSVC под Windows.")
 endif()
 
-# Опция /utf-8 для корректной сборки кириллических строк в MSVC
-add_compile_options(/utf-8)
+# 2. Флаги безопасности памяти и оптимизации LTCG для MSVC
+add_compile_options(/utf-8 /guard:cf /GL)
+add_link_options(/LTCG /GUARD:CF /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA)
 
 # Если триплет не задан извне, используем static-md для статической линковки GLFW
 if(NOT DEFINED VCPKG_TARGET_TRIPLET)
@@ -20,7 +22,7 @@ endif()
 set(STEAMWORKS_SDK_PATH "${CMAKE_CURRENT_SOURCE_DIR}/sdk" CACHE PATH "Path to Steamworks SDK")
 set(IMGUI_PATH "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/imgui" CACHE PATH "Path to Dear ImGui")
 
-# Поиск GLFW (CONFIG режим правильно подтягивает статический таргетинг vcpkg)
+# Поиск GLFW
 find_package(glfw3 CONFIG REQUIRED)
 
 # Исходные файлы ImGui
@@ -33,12 +35,14 @@ set(IMGUI_SOURCES
     ${IMGUI_PATH}/backends/imgui_impl_opengl3.cpp
 )
 
+# 3. Добавляем src/resource.rc в список файлов
 add_executable(${PROJECT_NAME} WIN32
     src/main.cpp
     src/wintun_manager.h
     src/wintun_manager.cpp
     src/steam_tunnel.h
     src/steam_tunnel.cpp
+    src/resource.rc
     ${IMGUI_SOURCES}
 )
 

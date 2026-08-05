@@ -1,6 +1,5 @@
 #include "wintun_manager.h"
 #include <iostream>
-#include <sstream>
 
 WintunManager::~WintunManager() {
     Shutdown();
@@ -16,6 +15,7 @@ bool WintunManager::Initialize(const std::wstring& adapterName, const std::strin
     pfnWintunCreateAdapter = (WINTUN_CREATE_ADAPTER_FUNC)GetProcAddress(m_hWintunDll, "WintunCreateAdapter");
     pfnWintunOpenAdapter = (WINTUN_OPEN_ADAPTER_FUNC)GetProcAddress(m_hWintunDll, "WintunOpenAdapter");
     pfnWintunCloseAdapter = (WINTUN_CLOSE_ADAPTER_FUNC)GetProcAddress(m_hWintunDll, "WintunCloseAdapter");
+    pfnWintunGetAdapterLUID = (WINTUN_GET_ADAPTER_LUID_FUNC)GetProcAddress(m_hWintunDll, "WintunGetAdapterLUID");
     pfnWintunStartSession = (WINTUN_START_SESSION_FUNC)GetProcAddress(m_hWintunDll, "WintunStartSession");
     pfnWintunEndSession = (WINTUN_END_SESSION_FUNC)GetProcAddress(m_hWintunDll, "WintunEndSession");
     pfnWintunGetReadWaitEvent = (WINTUN_GET_READ_WAIT_EVENT_FUNC)GetProcAddress(m_hWintunDll, "WintunGetReadWaitEvent");
@@ -24,7 +24,7 @@ bool WintunManager::Initialize(const std::wstring& adapterName, const std::strin
     pfnWintunAllocateSendPacket = (WINTUN_ALLOCATE_SEND_PACKET_FUNC)GetProcAddress(m_hWintunDll, "WintunAllocateSendPacket");
     pfnWintunSendPacket = (WINTUN_SEND_PACKET_FUNC)GetProcAddress(m_hWintunDll, "WintunSendPacket");
 
-    if (!pfnWintunCreateAdapter || !pfnWintunStartSession || !pfnWintunReceivePacket || !pfnWintunSendPacket) {
+    if (!pfnWintunCreateAdapter || !pfnWintunStartSession || !pfnWintunReceivePacket || !pfnWintunSendPacket || !pfnWintunGetAdapterLUID) {
         std::cerr << "[Wintun] Не удалось получить указатели на функции Wintun API\n";
         Shutdown();
         return false;
@@ -41,6 +41,13 @@ bool WintunManager::Initialize(const std::wstring& adapterName, const std::strin
         return false;
     }
 
+    // Настройка IP адреса и MTU через чистый Windows IP Helper API (без netsh процесса)
+    NET_LUID luid;
+    pfnWintunGetAdapterLUID(m_Adapter, &luid);
+    if (!SetAdapterIPAndMTU(luid, ipAddress, mtu)) {
+        std::cerr << "[Wintun] Ошибка установки IP-адреса через IPHlpApi\n";
+    }
+
     m_Session = pfnWintunStartSession(m_Adapter, 0x400000); // Буфер 4MB
     if (!m_Session) {
         std::cerr << "[Wintun] Ошибка открытия сессии Wintun\n";
@@ -48,16 +55,40 @@ bool WintunManager::Initialize(const std::wstring& adapterName, const std::strin
         return false;
     }
 
-    std::wstringstream ipCmd;
-    ipCmd << L"netsh interface ipv4 set address name=\"" << adapterName
-          << L"\" static " << std::wstring(ipAddress.begin(), ipAddress.end())
-          << L" " << std::wstring(netmask.begin(), netmask.end());
-    ExecuteSilentCmd(ipCmd.str());
+    return true;
+}
 
-    std::wstringstream mtuCmd;
-    mtuCmd << L"netsh interface ipv4 set subinterface \"" << adapterName
-           << L"\" mtu=" << mtu << L" store=persistent";
-    ExecuteSilentCmd(mtuCmd.str());
+bool WintunManager::SetAdapterIPAndMTU(NET_LUID luid, const std::string& ipAddress, uint32_t mtu) {
+    // 1. Установка IP-адреса
+    MIB_UNICASTIPADDRESS_ROW ipRow;
+    InitializeUnicastIpAddressEntry(&ipRow);
+    ipRow.InterfaceLuid = luid;
+    ipRow.Address.Ipv4.sin_family = AF_INET;
+    
+    if (inet_pton(AF_INET, ipAddress.c_str(), &ipRow.Address.Ipv4.sin_addr) != 1) {
+        return false;
+    }
+
+    ipRow.OnLinkPrefixLength = 24; // Подсеть 255.255.255.0 (/24)
+    ipRow.DadState = IpDadStatePreferred;
+
+    // Создаем запись адреса или обновляем существующую
+    DWORD status = CreateUnicastIpAddressEntry(&ipRow);
+    if (status != ERROR_SUCCESS && status != ERROR_OBJECT_ALREADY_EXISTS) {
+        // Если уже был установлен другой IP, меняем его
+        SetUnicastIpAddressEntry(&ipRow);
+    }
+
+    // 2. Установка MTU на интерфейсе
+    MIB_IPINTERFACE_ROW ifRow;
+    InitializeIpInterfaceEntry(&ifRow);
+    ifRow.InterfaceLuid = luid;
+    ifRow.Family = AF_INET;
+
+    if (GetIpInterfaceEntry(&ifRow) == ERROR_SUCCESS) {
+        ifRow.NlMtu = mtu;
+        SetIpInterfaceEntry(&ifRow);
+    }
 
     return true;
 }
@@ -107,20 +138,4 @@ bool WintunManager::SendPacket(const void* data, size_t size) {
 HANDLE WintunManager::GetReadWaitEvent() const {
     if (!m_Session || !pfnWintunGetReadWaitEvent) return nullptr;
     return pfnWintunGetReadWaitEvent(m_Session);
-}
-
-void WintunManager::ExecuteSilentCmd(const std::wstring& cmd) {
-    STARTUPINFOW si = { sizeof(si) };
-    PROCESS_INFORMATION pi;
-    si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-
-    std::vector<wchar_t> cmdBuffer(cmd.begin(), cmd.end());
-    cmdBuffer.push_back(L'\0');
-
-    if (CreateProcessW(NULL, cmdBuffer.data(), NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
-        WaitForSingleObject(pi.hProcess, INFINITE);
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
-    }
 }

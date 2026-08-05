@@ -18,6 +18,7 @@ enum class TunnelState {
 struct ConnectedPeer {
     uint64_t steamID = 0;
     std::string virtualIP;
+    int lastOctet = 0;
     int pingMs = 0;
     HSteamNetConnection hConn = k_HSteamNetConnection_Invalid;
 };
@@ -57,9 +58,11 @@ private:
     std::string m_lastError;
     uint64_t m_targetSteamID = 0;
     double m_connectStartTime = 0.0;
+    double m_lastPingUpdateTime = 0.0;
 
     std::string m_localVirtualIP;
     std::vector<ConnectedPeer> m_peers;
+    std::vector<uint8_t> m_packetBuffer; // Переиспользуемый буфер для снижения нагрузки на GC/Heap
 
     static SteamVpnTunnel* s_pInstance;
 };

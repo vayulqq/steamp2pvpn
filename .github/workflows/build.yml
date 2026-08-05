@@ -19,12 +19,12 @@ jobs:
       with:
         arch: x64
 
-    # Установка GLFW через vcpkg (который предустановлен на windows-latest)
+    # Установка GLFW через vcpkg
     - name: Install GLFW via Vcpkg
       run: |
         vcpkg install glfw3:x64-windows-static-md
 
-    # Автоматическое скачивание wintun.dll прямо в ходе сборки
+    # Автоматическое скачивание wintun.dll
     - name: Download Wintun DLL
       shell: powershell
       run: |
@@ -32,7 +32,7 @@ jobs:
         Expand-Archive -Path "wintun.zip" -DestinationPath "wintun-sdk"
         Copy-Item -Path "wintun-sdk/wintun/bin/amd64/wintun.dll" -Destination "."
 
-    # Конфигурация CMake с подключением vcpkg toolchain
+    # Конфигурация CMake с оптимизациями
     - name: Configure CMake
       run: |
         cmake -B build -S . `
@@ -45,20 +45,33 @@ jobs:
       run: |
         cmake --build build --config Release
 
+    # Создание временного сертификата и подпись бинарника (Code Signing)
+    - name: Code Sign Executable
+      shell: powershell
+      run: |
+        $cert = New-SelfSignedCertificate -CertStoreLocation cert:\CurrentUser\My -Subject "CN=SteamP2PVPN" -Type CodeSigningCert
+        $exePath = "build/Release/SteamP2PVPN.exe"
+        if (-not (Test-Path $exePath)) { $exePath = "build/SteamP2PVPN.exe" }
+        
+        # Подписываем утилитой signtool из Windows SDK
+        $signtool = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe"
+        if (-not (Test-Path $signtool)) {
+            $signtool = (Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Select-Object -First 1).FullName
+        }
+        & $signtool sign /fd SHA256 /sha1 $cert.Thumbprint $exePath
+
     # Подготовка директории с готовым релизным комплектом
     - name: Prepare Artifacts
       shell: powershell
       run: |
         New-Item -ItemType Directory -Force -Path "dist"
         
-        # Копируем .exe файл
         if (Test-Path "build/Release/SteamP2PVPN.exe") {
             Copy-Item "build/Release/SteamP2PVPN.exe" "dist/"
         } elseif (Test-Path "build/SteamP2PVPN.exe") {
             Copy-Item "build/SteamP2PVPN.exe" "dist/"
         }
         
-        # Копируем DLL-библиотеки и конфиг
         if (Test-Path "build/Release/steam_api64.dll") {
             Copy-Item "build/Release/steam_api64.dll" "dist/"
         } elseif (Test-Path "build/steam_api64.dll") {

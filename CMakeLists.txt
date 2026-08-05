@@ -59,3 +59,4 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     "${STEAMWORKS_SDK_PATH}/redistributable_bin/win64/steam_api64.dll"
     $<TARGET_FILE_DIR:${PROJECT_NAME}>
 )
+set_target_properties(${PROJECT_NAME} PROPERTIES LINK_FLAGS "/ENTRY:mainCRTStartup")

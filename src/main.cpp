@@ -8,6 +8,7 @@
 #include "steam_tunnel.h"
 #include <iostream>
 #include <fstream>
+#include <cstdlib>
 
 void EnsureSteamAppId() {
     std::ifstream check("steam_appid.txt");
@@ -85,26 +86,45 @@ int main(int argc, char** argv) {
             const char* myName = SteamFriends() ? SteamFriends()->GetPersonaName() : "Unknown";
             ImGui::Text("Профиль Steam: %s (ID: %llu)", myName, myID.ConvertToUint64());
         } else {
-            ImGui::TextColored(ImVec4(1, 0, 0, 1), "Steam API не активен!");
+            ImGui::TextColored(ImVec4(1.0f, 0.0f, 0.0f, 1.0f), "Steam API не активен!");
         }
 
         ImGui::Separator();
 
-        if (!tunnel.IsActive()) {
-            if (ImGui::Button("Запустить сеть (Хост - 192.168.137.1)", ImVec2(300, 30))) {
+        TunnelState state = tunnel.GetState();
+
+        if (state == TunnelState::Disconnected || state == TunnelState::Failed) {
+            if (state == TunnelState::Failed) {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
+                ImGui::TextWrapped("Ошибка подключения: %s", tunnel.GetLastError().c_str());
+                ImGui::PopStyleColor();
+                ImGui::Spacing();
+                ImGui::Separator();
+            }
+
+            if (ImGui::Button("Запустить сеть (Хост - 192.168.137.1)", ImVec2(340, 30))) {
                 tunnel.InitHost("192.168.137.1");
             }
 
             ImGui::Spacing();
             ImGui::InputText("Target SteamID", targetSteamIDBuf, sizeof(targetSteamIDBuf));
-            if (ImGui::Button("Подключиться к Хосту (Клиент - 192.168.137.2)", ImVec2(300, 30))) {
+            if (ImGui::Button("Подключиться к Хосту (Клиент - 192.168.137.2)", ImVec2(340, 30))) {
                 uint64_t targetID = std::strtoull(targetSteamIDBuf, nullptr, 10);
-                if (targetID != 0) {
-                    tunnel.InitClient(targetID, "192.168.137.2");
-                }
+                tunnel.InitClient(targetID, "192.168.137.2");
             }
-        } else {
-            ImGui::Text("Статус: %s", tunnel.IsHost() ? "Хостинг сети" : "Подключен к хосту");
+        }
+        else if (state == TunnelState::Connecting) {
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "Подключение к %llu...", tunnel.GetTargetSteamID());
+            ImGui::Text("Поиск P2P-маршрута и ожидание ответа от Хоста...");
+            ImGui::Spacing();
+
+            if (ImGui::Button("Отмена", ImVec2(150, 30))) {
+                tunnel.Shutdown();
+            }
+        }
+        else if (state == TunnelState::Connected) {
+            ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.2f, 1.0f), "Статус: %s", tunnel.IsHost() ? "Хостинг сети" : "Подключен к хосту");
+
             if (ImGui::Button("Отключиться", ImVec2(150, 30))) {
                 tunnel.Shutdown();
             }

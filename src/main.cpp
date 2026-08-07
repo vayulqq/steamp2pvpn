@@ -101,6 +101,7 @@ int main(int argc, char** argv) {
 
     SteamVpnTunnel tunnel;
     char targetSteamIDBuf[64] = "";
+    double relayWaitStartTime = -1.0; // момент, когда впервые заметили "сеть не готова"
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
@@ -123,6 +124,18 @@ int main(int argc, char** argv) {
         }
         bool relayNetworkReady = (relayStatus == k_ESteamNetworkingAvailability_Current);
 
+        // Считаем, сколько времени подряд сеть релеев не готова, чтобы отличить
+        // "обычная пара секунд после запуска" от "что-то реально не так"
+        // (фаервол, офлайн-режим Steam, недоступен api.steampowered.com и т.п.).
+        double now = glfwGetTime();
+        if (relayNetworkReady) {
+            relayWaitStartTime = -1.0;
+        } else if (relayWaitStartTime < 0.0) {
+            relayWaitStartTime = now;
+        }
+        double relayWaitSeconds = (relayWaitStartTime >= 0.0) ? (now - relayWaitStartTime) : 0.0;
+        bool relayWaitTooLong = relayWaitSeconds > 30.0;
+
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
@@ -140,9 +153,19 @@ int main(int argc, char** argv) {
                 ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.2f, 1.0f), "Сеть релеев Steam (SDR): готова");
             } else {
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.8f, 0.2f, 1.0f));
-                ImGui::TextWrapped("Сеть релеев Steam (SDR): не готова (%s) — подождите пару секунд после запуска.",
+                ImGui::TextWrapped("Сеть релеев Steam (SDR): не готова уже %.0f сек (%s)",
+                    relayWaitSeconds,
                     relayDetails.m_debugMsg[0] != '\0' ? relayDetails.m_debugMsg : "инициализация...");
                 ImGui::PopStyleColor();
+
+                if (relayWaitTooLong) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
+                    ImGui::TextWrapped(
+                        "Долгое ожидание обычно значит: Steam-клиент в оффлайн-режиме, "
+                        "фаервол/антивирус блокирует api.steampowered.com или UDP к relay-серверам Valve, "
+                        "либо для этого AppID не настроен P2P Networking в Steamworks.");
+                    ImGui::PopStyleColor();
+                }
             }
         } else {
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));

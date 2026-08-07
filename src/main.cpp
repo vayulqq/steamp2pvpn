@@ -87,6 +87,14 @@ int main(int argc, char** argv) {
             k_ESteamNetworkingConfig_Callback_ConnectionStatusChanged,
             (void*)SteamVpnTunnel::OnSteamNetConnectionStatusChanged
         );
+
+        // Раньше ConnectP2P мог мгновенно вернуть невалидный хендл ("Ошибка
+        // инициализации P2P-подключения"), если вызывался сразу после старта
+        // программы — Steam-клиент ещё не успел получить конфигурацию сети
+        // релеев (SDR) и измерить пинги до них. InitRelayNetworkAccess() явно
+        // запускает этот процесс заранее, а не откладывает его до первого
+        // реального ConnectP2P/CreateListenSocketP2P.
+        SteamNetworkingUtils()->InitRelayNetworkAccess();
     } else {
         std::cerr << "[SteamAPI] Ошибка инициализации: " << errMsg << "\n";
     }
@@ -103,6 +111,18 @@ int main(int argc, char** argv) {
         // SteamAPI_RunCallbacks() тоже вызывается из фонового потока.
         tunnel.Tick();
 
+        // Статус готовности relay-сети Steam (SDR) опрашивается каждый кадр —
+        // вызов дешёвый (просто читает закешированное состояние), тяжёлая
+        // работа по факту происходит асинхронно внутри Steam-клиента после
+        // InitRelayNetworkAccess(). Пока статус не "Current", ConnectP2P и
+        // CreateListenSocketP2P могут не работать как надо.
+        ESteamNetworkingAvailability relayStatus = k_ESteamNetworkingAvailability_Unknown;
+        SteamRelayNetworkStatus_t relayDetails;
+        if (steamInitialized && SteamNetworkingUtils()) {
+            relayStatus = SteamNetworkingUtils()->GetRelayNetworkStatus(&relayDetails);
+        }
+        bool relayNetworkReady = (relayStatus == k_ESteamNetworkingAvailability_Current);
+
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
@@ -115,6 +135,15 @@ int main(int argc, char** argv) {
             CSteamID myID = SteamUser()->GetSteamID();
             const char* myName = SteamFriends() ? SteamFriends()->GetPersonaName() : "Unknown";
             ImGui::Text("Профиль Steam: %s (ID: %llu)", myName, myID.ConvertToUint64());
+
+            if (relayNetworkReady) {
+                ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.2f, 1.0f), "Сеть релеев Steam (SDR): готова");
+            } else {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.8f, 0.2f, 1.0f));
+                ImGui::TextWrapped("Сеть релеев Steam (SDR): не готова (%s) — подождите пару секунд после запуска.",
+                    relayDetails.m_debugMsg[0] != '\0' ? relayDetails.m_debugMsg : "инициализация...");
+                ImGui::PopStyleColor();
+            }
         } else {
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
             ImGui::Text("Steam API не активен! Убедитесь, что клиент Steam запущен.");
@@ -137,8 +166,9 @@ int main(int argc, char** argv) {
                 ImGui::Separator();
             }
 
-            // Блокируем кнопки, если Steam API выключен
+            // Блокируем кнопки, если Steam API выключен или сеть релеев ещё не готова
             if (!steamInitialized) ImGui::BeginDisabled();
+            if (!relayNetworkReady) ImGui::BeginDisabled();
 
             if (ImGui::Button("Запустить сеть (Хост)", ImVec2(340, 30))) {
                 tunnel.InitHost();
@@ -153,14 +183,15 @@ int main(int argc, char** argv) {
             // Это не полноценная валидация (не проверяет тип аккаунта/юниверс),
             // но отсекает случайный мусор вроде "1" или "123".
             bool steamIdLooksValid = (targetID >= 76561197960265728ULL);
+            bool canConnect = steamIdLooksValid; // relayNetworkReady уже учтён внешним BeginDisabled выше
 
-            if (!steamIdLooksValid) {
+            if (!canConnect) {
                 ImGui::BeginDisabled();
             }
             if (ImGui::Button("Подключиться к Хосту (Клиент)", ImVec2(340, 30))) {
                 tunnel.InitClient(targetID);
             }
-            if (!steamIdLooksValid) {
+            if (!canConnect) {
                 ImGui::EndDisabled();
             }
 
@@ -174,6 +205,7 @@ int main(int argc, char** argv) {
             ImGui::TextDisabled("Виртуальная подсеть: %s0/24 (Хост: .%d)",
                 VpnConfig::kSubnetPrefix, VpnConfig::kHostOctet);
 
+            if (!relayNetworkReady) ImGui::EndDisabled();
             if (!steamInitialized) ImGui::EndDisabled();
         }
         else if (state == TunnelState::Connecting) {

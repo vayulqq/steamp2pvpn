@@ -146,15 +146,28 @@ int main(int argc, char** argv) {
 
             ImGui::Spacing();
             ImGui::InputText("Target SteamID", targetSteamIDBuf, sizeof(targetSteamIDBuf));
+
+            uint64_t targetID = std::strtoull(targetSteamIDBuf, nullptr, 10);
+            // Грубая проверка формата SteamID64: они лежат в диапазоне,
+            // начинающемся с 0x0110000100000000 (~76561197960265728).
+            // Это не полноценная валидация (не проверяет тип аккаунта/юниверс),
+            // но отсекает случайный мусор вроде "1" или "123".
+            bool steamIdLooksValid = (targetID >= 76561197960265728ULL);
+
+            if (!steamIdLooksValid) {
+                ImGui::BeginDisabled();
+            }
             if (ImGui::Button("Подключиться к Хосту (Клиент)", ImVec2(340, 30))) {
-                uint64_t targetID = std::strtoull(targetSteamIDBuf, nullptr, 10);
-                if (targetID == 0) {
-                    // Раньше некорректный/пустой ввод просто уходил в InitClient
-                    // и там отбраковывался асинхронно; проверяем сразу в UI,
-                    // чтобы не плодить лишний цикл Init/Shutdown.
-                } else {
-                    tunnel.InitClient(targetID);
-                }
+                tunnel.InitClient(targetID);
+            }
+            if (!steamIdLooksValid) {
+                ImGui::EndDisabled();
+            }
+
+            if (!steamIdLooksValid && targetSteamIDBuf[0] != '\0') {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
+                ImGui::TextWrapped("Некорректный SteamID64 (например, 76561198000000000)");
+                ImGui::PopStyleColor();
             }
 
             ImGui::Spacing();

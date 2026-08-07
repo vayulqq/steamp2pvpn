@@ -165,6 +165,17 @@ int main(int argc, char** argv) {
                         "фаервол/антивирус блокирует api.steampowered.com или UDP к relay-серверам Valve, "
                         "либо для этого AppID не настроен P2P Networking в Steamworks.");
                     ImGui::PopStyleColor();
+
+                    ImGui::Spacing();
+                    if (ImGui::Button("Повторить попытку (InitRelayNetworkAccess)", ImVec2(400, 26))) {
+                        // Согласно докам Valve, повторный вызов InitRelayNetworkAccess()
+                        // форсирует новую попытку, если предыдущая зависла/провалилась —
+                        // не требует перезапуска всего приложения.
+                        if (SteamNetworkingUtils()) {
+                            SteamNetworkingUtils()->InitRelayNetworkAccess();
+                        }
+                        relayWaitStartTime = now; // сбрасываем таймер ожидания заново
+                    }
                 }
             }
         } else {

@@ -10,11 +10,24 @@
 #include <fstream>
 #include <cstdlib>
 
+// Если рядом нет steam_appid.txt — создаём его с тестовым AppID Spacewar (480),
+// НО только если он не задан переменной окружения SteamAppId. Это позволяет
+// собрать релиз под реальную игру без ручного редактирования файла:
+// пользователь может выставить свой AppID через переменную окружения или
+// положить собственный steam_appid.txt рядом с exe — в обоих случаях
+// программа его не перезапишет.
 void EnsureSteamAppId() {
+    if (std::getenv("SteamAppId") != nullptr) {
+        return; // AppID уже задан через окружение — файл не нужен
+    }
+
     std::ifstream check("steam_appid.txt");
     if (!check.good()) {
         std::ofstream out("steam_appid.txt");
-        out << "480"; // Spacewar AppID для тестов
+        out << "480"; // Spacewar AppID для тестов, если ничего другого не указано
+        std::cerr << "[SteamAppId] Файл steam_appid.txt не найден, создан с тестовым AppID 480 (Spacewar).\n"
+                     "[SteamAppId] Для релизной сборки положите рядом с exe свой steam_appid.txt "
+                     "или задайте переменную окружения SteamAppId.\n";
     }
 }
 
@@ -46,9 +59,20 @@ int main(int argc, char** argv) {
     ImGuiIO& io = ImGui::GetIO(); (void)io;
     ImGui::StyleColorsDark();
 
+    // Пытаемся найти системный шрифт с кириллицей. Раньше при отсутствии
+    // обоих файлов (нестандартная/минимальная установка Windows, другой
+    // язык интерфейса ОС) ImGui оставался ВООБЩЕ без загруженного шрифта,
+    // и все русские надписи превращались в пустые прямоугольники.
+    // Теперь при неудаче явно подгружаем встроенный шрифт ImGui по умолчанию
+    // (без кириллицы, но хотя бы читаемый), чтобы UI не ломался визуально.
     ImFont* font = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 18.0f, nullptr, io.Fonts->GetGlyphRangesCyrillic());
     if (!font) {
         font = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\arial.ttf", 18.0f, nullptr, io.Fonts->GetGlyphRangesCyrillic());
+    }
+    if (!font) {
+        std::cerr << "[Fonts] Системные шрифты с кириллицей не найдены, использую встроенный шрифт ImGui "
+                     "(кириллица отображаться не будет).\n";
+        io.Fonts->AddFontDefault();
     }
 
     ImGui_ImplGlfw_InitForOpenGL(window, true);
@@ -73,10 +97,11 @@ int main(int argc, char** argv) {
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
 
-        // Безопасный вызов сетевого цикла кадра
-        if (steamInitialized) {
-            tunnel.Tick();
-        }
+        // Сетевой цикл (Wintun <-> Steam) теперь крутится в фоновом потоке
+        // внутри SteamVpnTunnel и не зависит от FPS окна — tunnel.Tick()
+        // оставлен как no-op вызов только для наглядности жизненного цикла.
+        // SteamAPI_RunCallbacks() тоже вызывается из фонового потока.
+        tunnel.Tick();
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
@@ -115,16 +140,26 @@ int main(int argc, char** argv) {
             // Блокируем кнопки, если Steam API выключен
             if (!steamInitialized) ImGui::BeginDisabled();
 
-            if (ImGui::Button("Запустить сеть (Хост - 192.168.137.1)", ImVec2(340, 30))) {
-                tunnel.InitHost("192.168.137.1");
+            if (ImGui::Button("Запустить сеть (Хост)", ImVec2(340, 30))) {
+                tunnel.InitHost();
             }
 
             ImGui::Spacing();
             ImGui::InputText("Target SteamID", targetSteamIDBuf, sizeof(targetSteamIDBuf));
-            if (ImGui::Button("Подключиться к Хосту (Клиент - 192.168.137.2)", ImVec2(340, 30))) {
+            if (ImGui::Button("Подключиться к Хосту (Клиент)", ImVec2(340, 30))) {
                 uint64_t targetID = std::strtoull(targetSteamIDBuf, nullptr, 10);
-                tunnel.InitClient(targetID, "192.168.137.2");
+                if (targetID == 0) {
+                    // Раньше некорректный/пустой ввод просто уходил в InitClient
+                    // и там отбраковывался асинхронно; проверяем сразу в UI,
+                    // чтобы не плодить лишний цикл Init/Shutdown.
+                } else {
+                    tunnel.InitClient(targetID);
+                }
             }
+
+            ImGui::Spacing();
+            ImGui::TextDisabled("Виртуальная подсеть: %s0/24 (Хост: .%d)",
+                VpnConfig::kSubnetPrefix, VpnConfig::kHostOctet);
 
             if (!steamInitialized) ImGui::EndDisabled();
         }
@@ -147,13 +182,18 @@ int main(int argc, char** argv) {
             ImGui::Separator();
             ImGui::Text("Подключенные Пиры:");
 
+            // GetPeers() теперь возвращает снимок (копию) списка под мьютексом,
+            // так что безопасно итерироваться, пока сетевой поток параллельно
+            // может добавлять/удалять пиров.
+            auto peers = tunnel.GetPeers();
+
             if (ImGui::BeginTable("PeersTable", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
                 ImGui::TableSetupColumn("SteamID");
                 ImGui::TableSetupColumn("Virtual IP");
                 ImGui::TableSetupColumn("Ping (RTT ms)");
                 ImGui::TableHeadersRow();
 
-                for (const auto& peer : tunnel.GetPeers()) {
+                for (const auto& peer : peers) {
                     ImGui::TableNextRow();
                     ImGui::TableSetColumnIndex(0);
                     ImGui::Text("%llu", peer.steamID);

@@ -12,16 +12,6 @@
 #include <fstream>
 #include <cstdlib>
 #include <string>
-#include <cstdio>
-
-static void InitConsoleLogging() {
-    if (AttachConsole(ATTACH_PARENT_PROCESS)) {
-        FILE* dummy;
-        freopen_s(&dummy, "CONOUT$", "w", stdout);
-        freopen_s(&dummy, "CONOUT$", "w", stderr);
-        std::ios::sync_with_stdio(true);
-    }
-}
 
 static void LogLine(const std::string& message) {
     LOG_INFO(message);
@@ -58,7 +48,7 @@ void EnsureSteamAppId() {
 }
 
 int main(int argc, char** argv) {
-    InitConsoleLogging();
+    Logger::AttachToParentConsole();
     LogLine("========== Запуск Steam P2P VPN ==========");
 
     EnsureSteamAppId();

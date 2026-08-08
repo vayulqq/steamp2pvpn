@@ -43,6 +43,7 @@ add_executable(${PROJECT_NAME} WIN32
     src/steam_tunnel.h
     src/steam_tunnel.cpp
     src/resource.rc
+    src/logger.h
     ${IMGUI_SOURCES}
 )
 

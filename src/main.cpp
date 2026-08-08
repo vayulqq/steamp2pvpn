@@ -15,8 +15,6 @@
 #include <sstream>
 #include <string>
 
-static std::ofstream g_logFile;
-
 static std::string TimestampNow() {
     auto now = std::chrono::system_clock::now();
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
@@ -31,8 +29,6 @@ static std::string TimestampNow() {
 static void LogLine(const std::string& message) {
     std::string line = "[" + TimestampNow() + "] " + message;
     std::cerr << line << "\n";
-    if (g_logFile.is_open()) {
-        g_logFile << line << std::endl;
     }
 }
 
@@ -67,7 +63,6 @@ void EnsureSteamAppId() {
 }
 
 int main(int argc, char** argv) {
-    g_logFile.open("vpn_log.txt", std::ios::app);
     LogLine("========== Запуск Steam P2P VPN ==========");
 
     EnsureSteamAppId();
@@ -339,6 +334,5 @@ int main(int argc, char** argv) {
     WSACleanup();
 
     LogLine("========== Завершение работы ==========");
-    g_logFile.close();
     return 0;
 }

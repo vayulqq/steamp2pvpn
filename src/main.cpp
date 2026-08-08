@@ -23,8 +23,6 @@ static void InitConsoleLogging() {
     }
 }
 
-// LogLine оставлен как тонкая обёртка над Logger::Info для минимальных
-// изменений в остальном коде main.cpp.
 static void LogLine(const std::string& message) {
     LOG_INFO(message);
 }

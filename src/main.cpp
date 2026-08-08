@@ -9,6 +9,56 @@
 #include <iostream>
 #include <fstream>
 #include <cstdlib>
+#include <chrono>
+#include <ctime>
+#include <iomanip>
+#include <sstream>
+#include <string>
+
+// ---------------------------------------------------------------------------
+// Простой файловый логгер для диагностики сетевых проблем (InitRelayNetworkAccess,
+// смены статуса SDR-сети и т.п.). Пишет одновременно в vpn_log.txt рядом с exe
+// и в stderr (видно, если запускать из консоли). Каждая строка сразу сбрасывается
+// на диск (std::endl), чтобы лог не терялся, если приложение зависнет/упадёт.
+// ---------------------------------------------------------------------------
+static std::ofstream g_logFile;
+
+static std::string TimestampNow() {
+    auto now = std::chrono::system_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
+    std::time_t t = std::chrono::system_clock::to_time_t(now);
+    std::tm tmBuf;
+    localtime_s(&tmBuf, &t);
+    std::ostringstream oss;
+    oss << std::put_time(&tmBuf, "%H:%M:%S") << '.' << std::setfill('0') << std::setw(3) << ms.count();
+    return oss.str();
+}
+
+static void LogLine(const std::string& message) {
+    std::string line = "[" + TimestampNow() + "] " + message;
+    std::cerr << line << "\n";
+    if (g_logFile.is_open()) {
+        g_logFile << line << std::endl; // endl = flush, лог не теряется при зависании/крэше
+    }
+}
+
+// Человекочитаемое имя для ESteamNetworkingAvailability, чтобы в логе не были
+// голые числа вроде "100" или "-101".
+static const char* RelayAvailabilityToString(ESteamNetworkingAvailability status) {
+    switch (status) {
+        case k_ESteamNetworkingAvailability_CannotTry: return "CannotTry (нет зависимого ресурса, напр. нет интернета)";
+        case k_ESteamNetworkingAvailability_Failed:     return "Failed (пробовали достаточно долго — не получилось)";
+        case k_ESteamNetworkingAvailability_Previously:  return "Previously (раньше работало, сейчас проблема)";
+        case k_ESteamNetworkingAvailability_Retrying:    return "Retrying (была ошибка, повторяем попытку)";
+        case k_ESteamNetworkingAvailability_NeverTried:  return "NeverTried (ещё не пытались)";
+        case k_ESteamNetworkingAvailability_Waiting:     return "Waiting (ждём зависимый ресурс)";
+        case k_ESteamNetworkingAvailability_Attempting:  return "Attempting (активно пытаемся, ещё не готово)";
+        case k_ESteamNetworkingAvailability_Current:     return "Current (готово)";
+        case k_ESteamNetworkingAvailability_Unknown:     return "Unknown (внутреннее служебное значение)";
+        default: return "???";
+    }
+}
+
 
 // Если рядом нет steam_appid.txt — создаём его с тестовым AppID Spacewar (480),
 // НО только если он не задан переменной окружения SteamAppId. Это позволяет
@@ -32,6 +82,9 @@ void EnsureSteamAppId() {
 }
 
 int main(int argc, char** argv) {
+    g_logFile.open("vpn_log.txt", std::ios::app);
+    LogLine("========== Запуск Steam P2P VPN ==========");
+
     EnsureSteamAppId();
 
     WSADATA wsaData;
@@ -81,6 +134,9 @@ int main(int argc, char** argv) {
     // Инициализация Steam API с проверкой
     SteamErrMsg errMsg = {0};
     bool steamInitialized = (SteamAPI_InitEx(&errMsg) == k_ESteamAPIInitResult_OK);
+    LogLine(steamInitialized
+        ? "[SteamAPI] SteamAPI_InitEx: успех"
+        : std::string("[SteamAPI] SteamAPI_InitEx: ОШИБКА — ") + errMsg);
 
     if (steamInitialized && SteamNetworkingUtils()) {
         SteamNetworkingUtils()->SetGlobalConfigValuePtr(
@@ -94,6 +150,7 @@ int main(int argc, char** argv) {
         // релеев (SDR) и измерить пинги до них. InitRelayNetworkAccess() явно
         // запускает этот процесс заранее, а не откладывает его до первого
         // реального ConnectP2P/CreateListenSocketP2P.
+        LogLine("[Relay] Вызов InitRelayNetworkAccess() (первичная инициализация при старте)");
         SteamNetworkingUtils()->InitRelayNetworkAccess();
     } else {
         std::cerr << "[SteamAPI] Ошибка инициализации: " << errMsg << "\n";
@@ -102,6 +159,11 @@ int main(int argc, char** argv) {
     SteamVpnTunnel tunnel;
     char targetSteamIDBuf[64] = "";
     double relayWaitStartTime = -1.0; // момент, когда впервые заметили "сеть не готова"
+
+    // Для логирования только ИЗМЕНЕНИЙ статуса (а не каждый кадр — иначе лог
+    // распухнет за секунду до гигабайт, т.к. цикл крутится на частоте кадров).
+    ESteamNetworkingAvailability lastLoggedRelayStatus = k_ESteamNetworkingAvailability_Unknown;
+    bool relayStatusLoggedOnce = false;
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
@@ -123,6 +185,21 @@ int main(int argc, char** argv) {
             relayStatus = SteamNetworkingUtils()->GetRelayNetworkStatus(&relayDetails);
         }
         bool relayNetworkReady = (relayStatus == k_ESteamNetworkingAvailability_Current);
+
+        // Логируем КАЖДОЕ изменение статуса сети релеев с таймстампом и
+        // диагностическим сообщением от Steam (relayDetails.m_debugMsg) —
+        // это как раз то, что видно в vpn_log.txt при разборе зависшего
+        // "Attempt #1 to fetch config..." и подобных проблем.
+        if (!relayStatusLoggedOnce || relayStatus != lastLoggedRelayStatus) {
+            std::ostringstream oss;
+            oss << "[Relay] Статус: " << RelayAvailabilityToString(relayStatus);
+            if (relayDetails.m_debugMsg[0] != '\0') {
+                oss << " | debug: " << relayDetails.m_debugMsg;
+            }
+            LogLine(oss.str());
+            lastLoggedRelayStatus = relayStatus;
+            relayStatusLoggedOnce = true;
+        }
 
         // Считаем, сколько времени подряд сеть релеев не готова, чтобы отличить
         // "обычная пара секунд после запуска" от "что-то реально не так"
@@ -171,6 +248,9 @@ int main(int argc, char** argv) {
                         // Согласно докам Valve, повторный вызов InitRelayNetworkAccess()
                         // форсирует новую попытку, если предыдущая зависла/провалилась —
                         // не требует перезапуска всего приложения.
+                        LogLine("[Relay] Вызов InitRelayNetworkAccess() (ручной повтор, ждали " +
+                            std::to_string((int)relayWaitSeconds) + " сек, текущий статус: " +
+                            RelayAvailabilityToString(relayStatus) + ")");
                         if (SteamNetworkingUtils()) {
                             SteamNetworkingUtils()->InitRelayNetworkAccess();
                         }
@@ -312,5 +392,8 @@ int main(int argc, char** argv) {
     glfwTerminate();
 
     WSACleanup();
+
+    LogLine("========== Завершение работы ==========");
+    g_logFile.close();
     return 0;
 }

@@ -144,7 +144,7 @@ bool WintunManager::SetAdapterIPAndMTU(NET_LUID luid, const std::string& ipAddre
     ULONG mask = 0;
     UINT8 prefixLength = 24;
     if (inet_pton(AF_INET, netmask.c_str(), &mask) == 1) {
-        DWORD convStatus = ConvertIpv4MaskToLength(ntohl(mask), &prefixLength);
+        DWORD convStatus = ConvertIpv4MaskToLength(mask, &prefixLength);
         if (convStatus != NO_ERROR) {
             LOG_ERROR("SetAdapterIPAndMTU: не удалось преобразовать маску '" + netmask +
                        "', код=" + std::to_string(convStatus));

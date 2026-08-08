@@ -15,12 +15,6 @@
 #include <sstream>
 #include <string>
 
-// ---------------------------------------------------------------------------
-// Простой файловый логгер для диагностики сетевых проблем (InitRelayNetworkAccess,
-// смены статуса SDR-сети и т.п.). Пишет одновременно в vpn_log.txt рядом с exe
-// и в stderr (видно, если запускать из консоли). Каждая строка сразу сбрасывается
-// на диск (std::endl), чтобы лог не терялся, если приложение зависнет/упадёт.
-// ---------------------------------------------------------------------------
 static std::ofstream g_logFile;
 
 static std::string TimestampNow() {
@@ -38,12 +32,10 @@ static void LogLine(const std::string& message) {
     std::string line = "[" + TimestampNow() + "] " + message;
     std::cerr << line << "\n";
     if (g_logFile.is_open()) {
-        g_logFile << line << std::endl; // endl = flush, лог не теряется при зависании/крэше
+        g_logFile << line << std::endl;
     }
 }
 
-// Человекочитаемое имя для ESteamNetworkingAvailability, чтобы в логе не были
-// голые числа вроде "100" или "-101".
 static const char* RelayAvailabilityToString(ESteamNetworkingAvailability status) {
     switch (status) {
         case k_ESteamNetworkingAvailability_CannotTry: return "CannotTry (нет зависимого ресурса, напр. нет интернета)";
@@ -59,18 +51,15 @@ static const char* RelayAvailabilityToString(ESteamNetworkingAvailability status
     }
 }
 
-
-// Если рядом нет steam_appid.txt — создаём его с тестовым AppID Spacewar (480),
-// НО только если он не задан переменной окружения SteamAppId.
 void EnsureSteamAppId() {
     if (std::getenv("SteamAppId") != nullptr) {
-        return; // AppID уже задан через окружение — файл не нужен
+        return;
     }
 
     std::ifstream check("steam_appid.txt");
     if (!check.good()) {
         std::ofstream out("steam_appid.txt");
-        out << "480"; // Spacewar AppID для тестов, если ничего другого не указано
+        out << "480";
         std::cerr << "[SteamAppId] Файл steam_appid.txt не найден, создан с тестовым AppID 480 (Spacewar).\n"
                      "[SteamAppId] Для релизной сборки положите рядом с exe свой steam_appid.txt "
                      "или задайте переменную окружения SteamAppId.\n";
@@ -121,7 +110,6 @@ int main(int argc, char** argv) {
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 330");
 
-    // Инициализация Steam API с проверкой
     SteamErrMsg errMsg = {0};
     bool steamInitialized = (SteamAPI_InitEx(&errMsg) == k_ESteamAPIInitResult_OK);
     LogLine(steamInitialized
@@ -142,7 +130,7 @@ int main(int argc, char** argv) {
 
     SteamVpnTunnel tunnel;
     char targetSteamIDBuf[64] = "";
-    double relayWaitStartTime = -1.0; // момент, когда впервые заметили "сеть не готова"
+    double relayWaitStartTime = -1.0;
 
     ESteamNetworkingAvailability lastLoggedRelayStatus = k_ESteamNetworkingAvailability_Unknown;
     bool relayStatusLoggedOnce = false;
@@ -150,18 +138,10 @@ int main(int argc, char** argv) {
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
 
-        // -------------------------------------------------------------------
-        // ИСПРАВЛЕНИЕ: Обязательно вызываем SteamAPI_RunCallbacks() в UI-цикле.
-        // Без этого сетевые ответы от InitRelayNetworkAccess() не обрабатываются
-        // до тех пор, пока не будет запущен фоновый сетевой поток туннеля.
-        // -------------------------------------------------------------------
-        if (steamInitialized) {
+        if (steamInitialized && !tunnel.IsThreadRunning()) {
             SteamAPI_RunCallbacks();
         }
 
-        tunnel.Tick();
-
-        // Опрашиваем статус SDR
         ESteamNetworkingAvailability relayStatus = k_ESteamNetworkingAvailability_Unknown;
         SteamRelayNetworkStatus_t relayDetails;
         if (steamInitialized && SteamNetworkingUtils()) {

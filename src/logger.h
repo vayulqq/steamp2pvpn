@@ -3,6 +3,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <chrono>
+#include <cstdio>
 #include <ctime>
 #include <iomanip>
 #include <iostream>
@@ -76,6 +77,15 @@ namespace Logger {
     inline void Info(const std::string& tag, const std::string& message)  { Log(Level::Info,  tag, message); }
     inline void Warn(const std::string& tag, const std::string& message)  { Log(Level::Warn,  tag, message); }
     inline void Error(const std::string& tag, const std::string& message) { Log(Level::Error, tag, message); }
+
+    inline void AttachToParentConsole() {
+        if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+            FILE* dummy = nullptr;
+            freopen_s(&dummy, "CONOUT$", "w", stdout);
+            freopen_s(&dummy, "CONOUT$", "w", stderr);
+            std::ios::sync_with_stdio(true);
+        }
+    }
 
 }
 

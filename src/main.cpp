@@ -61,11 +61,7 @@ static const char* RelayAvailabilityToString(ESteamNetworkingAvailability status
 
 
 // Если рядом нет steam_appid.txt — создаём его с тестовым AppID Spacewar (480),
-// НО только если он не задан переменной окружения SteamAppId. Это позволяет
-// собрать релиз под реальную игру без ручного редактирования файла:
-// пользователь может выставить свой AppID через переменную окружения или
-// положить собственный steam_appid.txt рядом с exe — в обоих случаях
-// программа его не перезапишет.
+// НО только если он не задан переменной окружения SteamAppId.
 void EnsureSteamAppId() {
     if (std::getenv("SteamAppId") != nullptr) {
         return; // AppID уже задан через окружение — файл не нужен
@@ -112,12 +108,6 @@ int main(int argc, char** argv) {
     ImGuiIO& io = ImGui::GetIO(); (void)io;
     ImGui::StyleColorsDark();
 
-    // Пытаемся найти системный шрифт с кириллицей. Раньше при отсутствии
-    // обоих файлов (нестандартная/минимальная установка Windows, другой
-    // язык интерфейса ОС) ImGui оставался ВООБЩЕ без загруженного шрифта,
-    // и все русские надписи превращались в пустые прямоугольники.
-    // Теперь при неудаче явно подгружаем встроенный шрифт ImGui по умолчанию
-    // (без кириллицы, но хотя бы читаемый), чтобы UI не ломался визуально.
     ImFont* font = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 18.0f, nullptr, io.Fonts->GetGlyphRangesCyrillic());
     if (!font) {
         font = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\arial.ttf", 18.0f, nullptr, io.Fonts->GetGlyphRangesCyrillic());
@@ -144,12 +134,6 @@ int main(int argc, char** argv) {
             (void*)SteamVpnTunnel::OnSteamNetConnectionStatusChanged
         );
 
-        // Раньше ConnectP2P мог мгновенно вернуть невалидный хендл ("Ошибка
-        // инициализации P2P-подключения"), если вызывался сразу после старта
-        // программы — Steam-клиент ещё не успел получить конфигурацию сети
-        // релеев (SDR) и измерить пинги до них. InitRelayNetworkAccess() явно
-        // запускает этот процесс заранее, а не откладывает его до первого
-        // реального ConnectP2P/CreateListenSocketP2P.
         LogLine("[Relay] Вызов InitRelayNetworkAccess() (первичная инициализация при старте)");
         SteamNetworkingUtils()->InitRelayNetworkAccess();
     } else {
@@ -160,25 +144,24 @@ int main(int argc, char** argv) {
     char targetSteamIDBuf[64] = "";
     double relayWaitStartTime = -1.0; // момент, когда впервые заметили "сеть не готова"
 
-    // Для логирования только ИЗМЕНЕНИЙ статуса (а не каждый кадр — иначе лог
-    // распухнет за секунду до гигабайт, т.к. цикл крутится на частоте кадров).
     ESteamNetworkingAvailability lastLoggedRelayStatus = k_ESteamNetworkingAvailability_Unknown;
     bool relayStatusLoggedOnce = false;
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
 
-        // Сетевой цикл (Wintun <-> Steam) теперь крутится в фоновом потоке
-        // внутри SteamVpnTunnel и не зависит от FPS окна — tunnel.Tick()
-        // оставлен как no-op вызов только для наглядности жизненного цикла.
-        // SteamAPI_RunCallbacks() тоже вызывается из фонового потока.
+        // -------------------------------------------------------------------
+        // ИСПРАВЛЕНИЕ: Обязательно вызываем SteamAPI_RunCallbacks() в UI-цикле.
+        // Без этого сетевые ответы от InitRelayNetworkAccess() не обрабатываются
+        // до тех пор, пока не будет запущен фоновый сетевой поток туннеля.
+        // -------------------------------------------------------------------
+        if (steamInitialized) {
+            SteamAPI_RunCallbacks();
+        }
+
         tunnel.Tick();
 
-        // Статус готовности relay-сети Steam (SDR) опрашивается каждый кадр —
-        // вызов дешёвый (просто читает закешированное состояние), тяжёлая
-        // работа по факту происходит асинхронно внутри Steam-клиента после
-        // InitRelayNetworkAccess(). Пока статус не "Current", ConnectP2P и
-        // CreateListenSocketP2P могут не работать как надо.
+        // Опрашиваем статус SDR
         ESteamNetworkingAvailability relayStatus = k_ESteamNetworkingAvailability_Unknown;
         SteamRelayNetworkStatus_t relayDetails;
         if (steamInitialized && SteamNetworkingUtils()) {
@@ -186,10 +169,6 @@ int main(int argc, char** argv) {
         }
         bool relayNetworkReady = (relayStatus == k_ESteamNetworkingAvailability_Current);
 
-        // Логируем КАЖДОЕ изменение статуса сети релеев с таймстампом и
-        // диагностическим сообщением от Steam (relayDetails.m_debugMsg) —
-        // это как раз то, что видно в vpn_log.txt при разборе зависшего
-        // "Attempt #1 to fetch config..." и подобных проблем.
         if (!relayStatusLoggedOnce || relayStatus != lastLoggedRelayStatus) {
             std::ostringstream oss;
             oss << "[Relay] Статус: " << RelayAvailabilityToString(relayStatus);
@@ -201,9 +180,6 @@ int main(int argc, char** argv) {
             relayStatusLoggedOnce = true;
         }
 
-        // Считаем, сколько времени подряд сеть релеев не готова, чтобы отличить
-        // "обычная пара секунд после запуска" от "что-то реально не так"
-        // (фаервол, офлайн-режим Steam, недоступен api.steampowered.com и т.п.).
         double now = glfwGetTime();
         if (relayNetworkReady) {
             relayWaitStartTime = -1.0;
@@ -245,16 +221,13 @@ int main(int argc, char** argv) {
 
                     ImGui::Spacing();
                     if (ImGui::Button("Повторить попытку (InitRelayNetworkAccess)", ImVec2(400, 26))) {
-                        // Согласно докам Valve, повторный вызов InitRelayNetworkAccess()
-                        // форсирует новую попытку, если предыдущая зависла/провалилась —
-                        // не требует перезапуска всего приложения.
                         LogLine("[Relay] Вызов InitRelayNetworkAccess() (ручной повтор, ждали " +
                             std::to_string((int)relayWaitSeconds) + " сек, текущий статус: " +
                             RelayAvailabilityToString(relayStatus) + ")");
                         if (SteamNetworkingUtils()) {
                             SteamNetworkingUtils()->InitRelayNetworkAccess();
                         }
-                        relayWaitStartTime = now; // сбрасываем таймер ожидания заново
+                        relayWaitStartTime = now;
                     }
                 }
             }
@@ -280,7 +253,6 @@ int main(int argc, char** argv) {
                 ImGui::Separator();
             }
 
-            // Блокируем кнопки, если Steam API выключен или сеть релеев ещё не готова
             if (!steamInitialized) ImGui::BeginDisabled();
             if (!relayNetworkReady) ImGui::BeginDisabled();
 
@@ -292,12 +264,8 @@ int main(int argc, char** argv) {
             ImGui::InputText("Target SteamID", targetSteamIDBuf, sizeof(targetSteamIDBuf));
 
             uint64_t targetID = std::strtoull(targetSteamIDBuf, nullptr, 10);
-            // Грубая проверка формата SteamID64: они лежат в диапазоне,
-            // начинающемся с 0x0110000100000000 (~76561197960265728).
-            // Это не полноценная валидация (не проверяет тип аккаунта/юниверс),
-            // но отсекает случайный мусор вроде "1" или "123".
             bool steamIdLooksValid = (targetID >= 76561197960265728ULL);
-            bool canConnect = steamIdLooksValid; // relayNetworkReady уже учтён внешним BeginDisabled выше
+            bool canConnect = steamIdLooksValid;
 
             if (!canConnect) {
                 ImGui::BeginDisabled();
@@ -341,9 +309,6 @@ int main(int argc, char** argv) {
             ImGui::Separator();
             ImGui::Text("Подключенные Пиры:");
 
-            // GetPeers() теперь возвращает снимок (копию) списка под мьютексом,
-            // так что безопасно итерироваться, пока сетевой поток параллельно
-            // может добавлять/удалять пиров.
             auto peers = tunnel.GetPeers();
 
             if (ImGui::BeginTable("PeersTable", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {

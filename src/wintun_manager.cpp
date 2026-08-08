@@ -1,14 +1,18 @@
+#define LOG_TAG "Wintun"
 #include "wintun_manager.h"
-#include <iostream>
+#include "logger.h"
 
 WintunManager::~WintunManager() {
     Shutdown();
 }
 
 bool WintunManager::Initialize(const std::wstring& adapterName, const std::string& ipAddress, const std::string& netmask, uint32_t mtu) {
+    LOG_INFO("Initialize: adapter='" + std::string(adapterName.begin(), adapterName.end()) +
+             "', ip=" + ipAddress + ", netmask=" + netmask + ", mtu=" + std::to_string(mtu));
+
     m_hWintunDll = LoadLibraryW(L"wintun.dll");
     if (!m_hWintunDll) {
-        std::cerr << "[Wintun] Не удалось загрузить wintun.dll\n";
+        LOG_ERROR("Не удалось загрузить wintun.dll (код ошибки: " + std::to_string(GetLastError()) + ")");
         return false;
     }
 
@@ -25,7 +29,7 @@ bool WintunManager::Initialize(const std::wstring& adapterName, const std::strin
     pfnWintunSendPacket = (WINTUN_SEND_PACKET_FUNC)GetProcAddress(m_hWintunDll, "WintunSendPacket");
 
     if (!pfnWintunCreateAdapter || !pfnWintunStartSession || !pfnWintunReceivePacket || !pfnWintunSendPacket || !pfnWintunGetAdapterLUID) {
-        std::cerr << "[Wintun] Не удалось получить указатели на функции Wintun API\n";
+        LOG_ERROR("Не удалось получить указатели на функции Wintun API");
         Shutdown();
         return false;
     }
@@ -36,34 +40,44 @@ bool WintunManager::Initialize(const std::wstring& adapterName, const std::strin
     }
 
     if (!m_Adapter) {
-        std::cerr << "[Wintun] Ошибка создания виртуального адаптера\n";
+        LOG_ERROR("Ошибка создания виртуального адаптера");
         Shutdown();
         return false;
     }
+    LOG_INFO("Виртуальный адаптер создан успешно");
 
     NET_LUID luid;
     pfnWintunGetAdapterLUID(m_Adapter, &luid);
     if (!SetAdapterIPAndMTU(luid, ipAddress, netmask, mtu)) {
-        std::cerr << "[Wintun] Ошибка установки IP-адреса через IPHlpApi\n";
+        LOG_ERROR("Ошибка установки IP-адреса через IPHlpApi");
         Shutdown();
         return false;
     }
 
     m_Session = pfnWintunStartSession(m_Adapter, 0x400000);
     if (!m_Session) {
-        std::cerr << "[Wintun] Ошибка открытия сессии Wintun\n";
+        LOG_ERROR("Ошибка открытия сессии Wintun");
         Shutdown();
         return false;
     }
 
+    LOG_INFO("Сессия Wintun открыта, IP=" + ipAddress + " успешно назначен");
     return true;
 }
 
 bool WintunManager::UpdateIP(const std::string& ipAddress, const std::string& netmask, uint32_t mtu) {
-    if (!m_Adapter || !pfnWintunGetAdapterLUID) return false;
+    if (!m_Adapter || !pfnWintunGetAdapterLUID) {
+        LOG_WARN("UpdateIP вызван до инициализации адаптера, ip=" + ipAddress);
+        return false;
+    }
+    LOG_INFO("UpdateIP: новый адрес " + ipAddress);
     NET_LUID luid;
     pfnWintunGetAdapterLUID(m_Adapter, &luid);
-    return SetAdapterIPAndMTU(luid, ipAddress, netmask, mtu);
+    bool ok = SetAdapterIPAndMTU(luid, ipAddress, netmask, mtu);
+    if (!ok) {
+        LOG_ERROR("UpdateIP: не удалось применить адрес " + ipAddress);
+    }
+    return ok;
 }
 
 bool WintunManager::SetAdapterIPAndMTU(NET_LUID luid, const std::string& ipAddress, const std::string& netmask, uint32_t mtu) {
@@ -107,6 +121,9 @@ bool WintunManager::SetAdapterIPAndMTU(NET_LUID luid, const std::string& ipAddre
 }
 
 void WintunManager::Shutdown() {
+    if (m_Session || m_Adapter) {
+        LOG_INFO("Shutdown: освобождение ресурсов Wintun");
+    }
     if (m_Session && pfnWintunEndSession) {
         pfnWintunEndSession(m_Session);
         m_Session = nullptr;
@@ -152,6 +169,7 @@ bool WintunManager::SendPacket(const void* data, size_t size) {
 
     BYTE* packet = pfnWintunAllocateSendPacket(m_Session, static_cast<DWORD>(size));
     if (!packet) {
+        LOG_WARN("SendPacket: не удалось выделить буфер размером " + std::to_string(size) + " байт (кольцевой буфер переполнен?)");
         return false;
     }
 

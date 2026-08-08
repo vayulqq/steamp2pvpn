@@ -1,0 +1,42 @@
+name: Build Relay Test Tool
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-relay-test:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        # submodules не нужны — relay_test.cpp зависит только от папки sdk/,
+        # которая уже лежит в репозитории (в отличие от основного проекта,
+        # тут не нужны GLFW/ImGui/Wintun)
+
+      # Настройка окружения MSVC (x64) — даёт доступ к cl.exe в PATH
+      - name: Setup MSVC Environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # Прямая компиляция одним файлом через cl.exe — CMake тут избыточен,
+      # у утилиты всего одна единица трансляции и одна внешняя зависимость (steam_api64.lib)
+      - name: Compile relay_test.cpp
+        run: |
+          cl /EHsc /I sdk\public relay_test.cpp /Fe:relay_test.exe /link sdk\redistributable_bin\win64\steam_api64.lib
+
+      # relay_test.exe без steam_api64.dll рядом не запустится — DLL подгружается в рантайме
+      - name: Prepare artifacts
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path "dist"
+          Copy-Item "relay_test.exe" "dist/"
+          Copy-Item "sdk/redistributable_bin/win64/steam_api64.dll" "dist/"
+          "480" | Out-File -FilePath "dist/steam_appid.txt" -Encoding ascii
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RelayTest-Windows-x64
+          path: dist/

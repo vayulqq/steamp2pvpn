@@ -14,6 +14,16 @@
 #include <iomanip>
 #include <sstream>
 #include <string>
+#include <cstdio>
+
+static void InitConsoleLogging() {
+    if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+        FILE* dummy;
+        freopen_s(&dummy, "CONOUT$", "w", stdout);
+        freopen_s(&dummy, "CONOUT$", "w", stderr);
+        std::ios::sync_with_stdio(true);
+    }
+}
 
 static std::string TimestampNow() {
     auto now = std::chrono::system_clock::now();
@@ -62,6 +72,7 @@ void EnsureSteamAppId() {
 }
 
 int main(int argc, char** argv) {
+    InitConsoleLogging();
     LogLine("========== Запуск Steam P2P VPN ==========");
 
     EnsureSteamAppId();

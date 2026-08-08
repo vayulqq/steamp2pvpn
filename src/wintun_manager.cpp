@@ -6,8 +6,22 @@ WintunManager::~WintunManager() {
     Shutdown();
 }
 
+std::string WintunManager::WstringToString(const std::wstring& wstr) {
+    if (wstr.empty()) return {};
+    int size_needed = WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), NULL, 0, NULL, NULL);
+    std::string strTo(size_needed, 0);
+    WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), &strTo[0], size_needed, NULL, NULL);
+    return strTo;
+}
+
 bool WintunManager::Initialize(const std::wstring& adapterName, const std::string& ipAddress, const std::string& netmask, uint32_t mtu) {
-    LOG_INFO("Initialize: adapter='" + std::string(adapterName.begin(), adapterName.end()) +
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    if (m_hWintunDll || m_Adapter || m_Session) {
+        return false;
+    }
+
+    LOG_INFO("Initialize: adapter='" + WstringToString(adapterName) +
              "', ip=" + ipAddress + ", netmask=" + netmask + ", mtu=" + std::to_string(mtu));
 
     m_hWintunDll = LoadLibraryW(L"wintun.dll");
@@ -66,6 +80,8 @@ bool WintunManager::Initialize(const std::wstring& adapterName, const std::strin
 }
 
 bool WintunManager::UpdateIP(const std::string& ipAddress, const std::string& netmask, uint32_t mtu) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     if (!m_Adapter || !pfnWintunGetAdapterLUID) {
         LOG_WARN("UpdateIP вызван до инициализации адаптера, ip=" + ipAddress);
         return false;
@@ -81,6 +97,16 @@ bool WintunManager::UpdateIP(const std::string& ipAddress, const std::string& ne
 }
 
 bool WintunManager::SetAdapterIPAndMTU(NET_LUID luid, const std::string& ipAddress, const std::string& netmask, uint32_t mtu) {
+    PMIB_UNICASTIPADDRESS_TABLE table = nullptr;
+    if (GetUnicastIpAddressTable(AF_INET, &table) == NO_ERROR) {
+        for (ULONG i = 0; i < table->NumEntries; ++i) {
+            if (table->Table[i].InterfaceLuid.Value == luid.Value) {
+                DeleteUnicastIpAddressEntry(&table->Table[i]);
+            }
+        }
+        FreeMibTable(table);
+    }
+
     MIB_UNICASTIPADDRESS_ROW ipRow;
     InitializeUnicastIpAddressEntry(&ipRow);
     ipRow.InterfaceLuid = luid;
@@ -93,7 +119,9 @@ bool WintunManager::SetAdapterIPAndMTU(NET_LUID luid, const std::string& ipAddre
     ULONG mask = 0;
     UINT8 prefixLength = 24;
     if (inet_pton(AF_INET, netmask.c_str(), &mask) == 1) {
-        ConvertIpv4MaskToLength(ntohl(mask), &prefixLength);
+        if (ConvertIpv4MaskToLength(ntohl(mask), &prefixLength) != NO_ERROR) {
+            return false;
+        }
     }
     ipRow.OnLinkPrefixLength = prefixLength;
     ipRow.DadState = IpDadStatePreferred;
@@ -121,6 +149,8 @@ bool WintunManager::SetAdapterIPAndMTU(NET_LUID luid, const std::string& ipAddre
 }
 
 void WintunManager::Shutdown() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     if (m_Session || m_Adapter) {
         LOG_INFO("Shutdown: освобождение ресурсов Wintun");
     }
@@ -151,6 +181,8 @@ void WintunManager::Shutdown() {
 }
 
 bool WintunManager::ReceivePacket(std::vector<uint8_t>& outBuffer) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     if (!m_Session || !pfnWintunReceivePacket || !pfnWintunReleaseReceivePacket) return false;
 
     DWORD packetSize = 0;
@@ -165,6 +197,8 @@ bool WintunManager::ReceivePacket(std::vector<uint8_t>& outBuffer) {
 }
 
 bool WintunManager::SendPacket(const void* data, size_t size) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     if (!m_Session || size == 0 || !pfnWintunAllocateSendPacket || !pfnWintunSendPacket) return false;
 
     BYTE* packet = pfnWintunAllocateSendPacket(m_Session, static_cast<DWORD>(size));
@@ -179,6 +213,13 @@ bool WintunManager::SendPacket(const void* data, size_t size) {
 }
 
 HANDLE WintunManager::GetReadWaitEvent() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     if (!m_Session || !pfnWintunGetReadWaitEvent) return nullptr;
     return pfnWintunGetReadWaitEvent(m_Session);
+}
+
+bool WintunManager::IsInitialized() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_Session != nullptr;
 }

@@ -1,5 +1,6 @@
+#define LOG_TAG "SteamTunnel"
 #include "steam_tunnel.h"
-#include <iostream>
+#include "logger.h"
 #include <algorithm>
 #include <chrono>
 
@@ -22,6 +23,9 @@ SteamVpnTunnel::~SteamVpnTunnel() {
 }
 
 void SteamVpnTunnel::SetError(const std::string& err) {
+    if (!err.empty()) {
+        LOG_ERROR(err);
+    }
     std::lock_guard<std::mutex> lock(m_errorMutex);
     m_lastError = err;
 }
@@ -49,12 +53,16 @@ void SteamVpnTunnel::HandleConnectionStatusChanged(SteamNetConnectionStatusChang
                 currentPeers = m_peers.size();
             }
             if (currentPeers >= static_cast<size_t>(VpnConfig::kMaxPeerOctet - VpnConfig::kMinPeerOctet + 1)) {
+                LOG_WARN("Отклонено входящее соединение: сеть заполнена (пиров: " + std::to_string(currentPeers) + ")");
                 SteamNetworkingSockets()->CloseConnection(pInfo->m_hConn, 0, "VPN full", false);
                 break;
             }
 
             if (SteamNetworkingSockets()->AcceptConnection(pInfo->m_hConn) == k_EResultOK) {
                 SteamNetworkingSockets()->SetConnectionPollGroup(pInfo->m_hConn, m_hPollGroup);
+                LOG_INFO("Входящее соединение принято, hConn=" + std::to_string(pInfo->m_hConn));
+            } else {
+                LOG_WARN("AcceptConnection не удался, hConn=" + std::to_string(pInfo->m_hConn));
             }
         }
         break;
@@ -100,6 +108,9 @@ void SteamVpnTunnel::HandleConnectionStatusChanged(SteamNetConnectionStatusChang
             peer.virtualIP = std::string(VpnConfig::kSubnetPrefix) + std::to_string(freeOctet);
             m_peers.push_back(peer);
 
+            LOG_INFO("Новый пир подключен: steamID=" + std::to_string(remoteSteamID) +
+                     ", virtualIP=" + peer.virtualIP);
+
             uint8_t handshake[6] = { 0xFF, 'V', 'P', 'N', 0x01, static_cast<uint8_t>(freeOctet) };
             SteamNetworkingSockets()->SendMessageToConnection(
                 pInfo->m_hConn, handshake, sizeof(handshake),
@@ -127,6 +138,8 @@ void SteamVpnTunnel::HandleConnectionStatusChanged(SteamNetConnectionStatusChang
             }
         }
 
+        LOG_INFO("Соединение закрыто, hConn=" + std::to_string(pInfo->m_hConn) + ": " + reasonStr);
+
         SteamNetworkingSockets()->CloseConnection(pInfo->m_hConn, 0, nullptr, false);
         {
             std::lock_guard<std::mutex> lock(m_peersMutex);
@@ -147,6 +160,7 @@ void SteamVpnTunnel::HandleConnectionStatusChanged(SteamNetConnectionStatusChang
 }
 
 bool SteamVpnTunnel::InitHost(const std::string& virtualIP) {
+    LOG_INFO("InitHost: virtualIP=" + virtualIP);
     Shutdown();
     SetError("");
 
@@ -175,12 +189,15 @@ bool SteamVpnTunnel::InitHost(const std::string& virtualIP) {
     m_isHost.store(true);
     m_state.store(TunnelState::Connected);
 
+    LOG_INFO("Хост запущен успешно, слушаем P2P-соединения");
+
     m_threadRunning.store(true);
     m_networkThread = std::thread(&SteamVpnTunnel::NetworkThreadLoop, this);
     return true;
 }
 
 bool SteamVpnTunnel::InitClient(uint64_t targetSteamID, const std::string& virtualIP) {
+    LOG_INFO("InitClient: targetSteamID=" + std::to_string(targetSteamID) + ", virtualIP=" + virtualIP);
     Shutdown();
     m_targetSteamID.store(targetSteamID);
     SetError("");
@@ -221,6 +238,8 @@ bool SteamVpnTunnel::InitClient(uint64_t targetSteamID, const std::string& virtu
     m_isClient.store(true);
     m_state.store(TunnelState::Connecting);
     m_connectStartTime = GetCurrentTimeSeconds();
+
+    LOG_INFO("P2P-подключение инициировано, ожидаем handshake от хоста");
 
     m_threadRunning.store(true);
     m_networkThread = std::thread(&SteamVpnTunnel::NetworkThreadLoop, this);
@@ -327,6 +346,8 @@ void SteamVpnTunnel::TickInternal() {
 
                         m_state.store(TunnelState::Connected);
                         SetError("");
+
+                        LOG_INFO("Handshake получен, назначенный virtualIP=" + assignedIP);
                     }
                     pMsgs[i]->Release();
                     continue;
@@ -381,6 +402,10 @@ void SteamVpnTunnel::TickInternal() {
 }
 
 void SteamVpnTunnel::Shutdown() {
+    if (m_isHost.load() || m_isClient.load() || m_state.load() != TunnelState::Disconnected) {
+        LOG_INFO("Shutdown: остановка туннеля");
+    }
+
     m_threadRunning.store(false, std::memory_order_relaxed);
     if (m_networkThread.joinable()) {
         m_networkThread.join();

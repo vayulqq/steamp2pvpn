@@ -71,12 +71,12 @@ void SteamVpnTunnel::HandleConnectionStatusChanged(SteamNetConnectionStatusChang
             break;
         }
 
-        ConnectedPeer peer;
-        peer.steamID = remoteSteamID;
-        peer.hConn = pInfo->m_hConn;
-        peer.pingMs = 0;
-
         if (m_isHost.load()) {
+            ConnectedPeer peer;
+            peer.steamID = remoteSteamID;
+            peer.hConn = pInfo->m_hConn;
+            peer.pingMs = 0;
+
             std::lock_guard<std::mutex> lock(m_peersMutex);
 
             bool usedIPs[256] = { false };
@@ -99,15 +99,11 @@ void SteamVpnTunnel::HandleConnectionStatusChanged(SteamNetConnectionStatusChang
             peer.lastOctet = freeOctet;
             peer.virtualIP = std::string(VpnConfig::kSubnetPrefix) + std::to_string(freeOctet);
             m_peers.push_back(peer);
-        } else if (m_isClient.load() && pInfo->m_hConn == hostConn) {
-            peer.lastOctet = VpnConfig::kHostOctet;
-            peer.virtualIP = std::string(VpnConfig::kSubnetPrefix) + std::to_string(VpnConfig::kHostOctet);
-            {
-                std::lock_guard<std::mutex> lock(m_peersMutex);
-                m_peers.push_back(peer);
-            }
-            m_state.store(TunnelState::Connected);
-            SetError("");
+
+            uint8_t handshake[6] = { 0xFF, 'V', 'P', 'N', 0x01, static_cast<uint8_t>(freeOctet) };
+            SteamNetworkingSockets()->SendMessageToConnection(
+                pInfo->m_hConn, handshake, sizeof(handshake),
+                k_nSteamNetworkingSend_Reliable, nullptr);
         }
         break;
     }
@@ -267,8 +263,11 @@ void SteamVpnTunnel::TickInternal() {
     bool isHost = m_isHost.load();
     if (m_state.load() != TunnelState::Connected && !isHost) return;
 
-    std::vector<uint8_t> packetBuffer;
-    packetBuffer.reserve(2048);
+    thread_local std::vector<uint8_t> packetBuffer;
+    packetBuffer.clear();
+    if (packetBuffer.capacity() < 2048) {
+        packetBuffer.reserve(2048);
+    }
 
     while (m_wintun.ReceivePacket(packetBuffer)) {
         if (isHost) {
@@ -305,6 +304,31 @@ void SteamVpnTunnel::TickInternal() {
                 uint8_t* data = static_cast<uint8_t*>(pMsgs[i]->m_pData);
                 size_t size = pMsgs[i]->m_cbSize;
                 HSteamNetConnection sourceConn = pMsgs[i]->m_conn;
+
+                if (size == 6 && data[0] == 0xFF && data[1] == 'V' && data[2] == 'P' && data[3] == 'N' && data[4] == 0x01) {
+                    if (m_isClient.load() && sourceConn == hostConn) {
+                        uint8_t assignedOctet = data[5];
+                        std::string assignedIP = std::string(VpnConfig::kSubnetPrefix) + std::to_string(assignedOctet);
+                        m_wintun.UpdateIP(assignedIP);
+
+                        ConnectedPeer hostPeer;
+                        hostPeer.steamID = m_targetSteamID.load();
+                        hostPeer.hConn = hostConn;
+                        hostPeer.lastOctet = VpnConfig::kHostOctet;
+                        hostPeer.virtualIP = std::string(VpnConfig::kSubnetPrefix) + std::to_string(VpnConfig::kHostOctet);
+
+                        {
+                            std::lock_guard<std::mutex> lock(m_peersMutex);
+                            m_peers.clear();
+                            m_peers.push_back(hostPeer);
+                        }
+
+                        m_state.store(TunnelState::Connected);
+                        SetError("");
+                    }
+                    pMsgs[i]->Release();
+                    continue;
+                }
 
                 bool looksIPv4 = size >= 20 && (data[0] >> 4) == 4;
 

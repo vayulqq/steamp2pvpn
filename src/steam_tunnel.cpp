@@ -261,38 +261,40 @@ void SteamVpnTunnel::TickInternal() {
     }
 
     bool isHost = m_isHost.load();
-    if (m_state.load() != TunnelState::Connected && !isHost) return;
+    bool isConnected = (m_state.load() == TunnelState::Connected);
 
-    thread_local std::vector<uint8_t> packetBuffer;
-    packetBuffer.clear();
-    if (packetBuffer.capacity() < 2048) {
-        packetBuffer.reserve(2048);
-    }
-
-    while (m_wintun.ReceivePacket(packetBuffer)) {
-        if (isHost) {
-            std::lock_guard<std::mutex> lock(m_peersMutex);
-            bool looksIPv4 = packetBuffer.size() >= 20 && (packetBuffer[0] >> 4) == 4;
-            uint8_t destFirstOctet = looksIPv4 ? packetBuffer[16] : 0;
-            uint8_t destLastOctet = looksIPv4 ? packetBuffer[19] : static_cast<uint8_t>(VpnConfig::kBroadcastOctet);
-            bool isMulticast = looksIPv4 && (destFirstOctet >= 224 && destFirstOctet <= 239);
-            bool isBroadcast = !looksIPv4 || isMulticast || (destLastOctet == VpnConfig::kBroadcastOctet);
-
-            for (const auto& peer : m_peers) {
-                if (isBroadcast || peer.lastOctet == destLastOctet) {
-                    SteamNetworkingSockets()->SendMessageToConnection(
-                        peer.hConn, packetBuffer.data(), static_cast<uint32_t>(packetBuffer.size()),
-                        k_nSteamNetworkingSend_UnreliableNoDelay, nullptr);
-
-                    if (!isBroadcast) break;
-                }
-            }
-        } else if (m_isClient.load() && hostConn != k_HSteamNetConnection_Invalid) {
-            SteamNetworkingSockets()->SendMessageToConnection(
-                hostConn, packetBuffer.data(), static_cast<uint32_t>(packetBuffer.size()),
-                k_nSteamNetworkingSend_UnreliableNoDelay, nullptr);
-        }
+    if (isConnected || isHost) {
+        thread_local std::vector<uint8_t> packetBuffer;
         packetBuffer.clear();
+        if (packetBuffer.capacity() < 2048) {
+            packetBuffer.reserve(2048);
+        }
+
+        while (m_wintun.ReceivePacket(packetBuffer)) {
+            if (isHost) {
+                std::lock_guard<std::mutex> lock(m_peersMutex);
+                bool looksIPv4 = packetBuffer.size() >= 20 && (packetBuffer[0] >> 4) == 4;
+                uint8_t destFirstOctet = looksIPv4 ? packetBuffer[16] : 0;
+                uint8_t destLastOctet = looksIPv4 ? packetBuffer[19] : static_cast<uint8_t>(VpnConfig::kBroadcastOctet);
+                bool isMulticast = looksIPv4 && (destFirstOctet >= 224 && destFirstOctet <= 239);
+                bool isBroadcast = !looksIPv4 || isMulticast || (destLastOctet == VpnConfig::kBroadcastOctet);
+
+                for (const auto& peer : m_peers) {
+                    if (isBroadcast || peer.lastOctet == destLastOctet) {
+                        SteamNetworkingSockets()->SendMessageToConnection(
+                            peer.hConn, packetBuffer.data(), static_cast<uint32_t>(packetBuffer.size()),
+                            k_nSteamNetworkingSend_UnreliableNoDelay, nullptr);
+
+                        if (!isBroadcast) break;
+                    }
+                }
+            } else if (m_isClient.load() && hostConn != k_HSteamNetConnection_Invalid) {
+                SteamNetworkingSockets()->SendMessageToConnection(
+                    hostConn, packetBuffer.data(), static_cast<uint32_t>(packetBuffer.size()),
+                    k_nSteamNetworkingSend_UnreliableNoDelay, nullptr);
+            }
+            packetBuffer.clear();
+        }
     }
 
     if (m_hPollGroup != k_HSteamNetPollGroup_Invalid) {
@@ -356,7 +358,7 @@ void SteamVpnTunnel::TickInternal() {
                             }
                         }
                     }
-                } else {
+                } else if (isConnected) {
                     m_wintun.SendPacket(data, size);
                 }
 

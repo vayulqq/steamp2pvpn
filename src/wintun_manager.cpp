@@ -93,7 +93,7 @@ bool WintunManager::SetAdapterIPAndMTU(NET_LUID luid, const std::string& ipAddre
     ULONG mask = 0;
     UINT8 prefixLength = 24;
     if (inet_pton(AF_INET, netmask.c_str(), &mask) == 1) {
-        ConvertIpv4MaskToLength(mask, &prefixLength);
+        ConvertIpv4MaskToLength(ntohl(mask), &prefixLength);
     }
     ipRow.OnLinkPrefixLength = prefixLength;
     ipRow.DadState = IpDadStatePreferred;

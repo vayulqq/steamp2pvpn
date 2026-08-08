@@ -5,14 +5,12 @@
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
 #include <steam/steam_api.h>
+#define LOG_TAG "Main"
 #include "steam_tunnel.h"
+#include "logger.h"
 #include <iostream>
 #include <fstream>
 #include <cstdlib>
-#include <chrono>
-#include <ctime>
-#include <iomanip>
-#include <sstream>
 #include <string>
 #include <cstdio>
 
@@ -25,20 +23,10 @@ static void InitConsoleLogging() {
     }
 }
 
-static std::string TimestampNow() {
-    auto now = std::chrono::system_clock::now();
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
-    std::time_t t = std::chrono::system_clock::to_time_t(now);
-    std::tm tmBuf;
-    localtime_s(&tmBuf, &t);
-    std::ostringstream oss;
-    oss << std::put_time(&tmBuf, "%H:%M:%S") << '.' << std::setfill('0') << std::setw(3) << ms.count();
-    return oss.str();
-}
-
+// LogLine оставлен как тонкая обёртка над Logger::Info для минимальных
+// изменений в остальном коде main.cpp.
 static void LogLine(const std::string& message) {
-    std::string line = "[" + TimestampNow() + "] " + message;
-    std::cerr << line << "\n";
+    LOG_INFO(message);
 }
 
 static const char* RelayAvailabilityToString(ESteamNetworkingAvailability status) {
@@ -65,9 +53,9 @@ void EnsureSteamAppId() {
     if (!check.good()) {
         std::ofstream out("steam_appid.txt");
         out << "480";
-        std::cerr << "[SteamAppId] Файл steam_appid.txt не найден, создан с тестовым AppID 480 (Spacewar).\n"
-                     "[SteamAppId] Для релизной сборки положите рядом с exe свой steam_appid.txt "
-                     "или задайте переменную окружения SteamAppId.\n";
+        LOG_WARN("Файл steam_appid.txt не найден, создан с тестовым AppID 480 (Spacewar). "
+                 "Для релизной сборки положите рядом с exe свой steam_appid.txt "
+                 "или задайте переменную окружения SteamAppId.");
     }
 }
 
@@ -107,8 +95,8 @@ int main(int argc, char** argv) {
         font = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\arial.ttf", 18.0f, nullptr, io.Fonts->GetGlyphRangesCyrillic());
     }
     if (!font) {
-        std::cerr << "[Fonts] Системные шрифты с кириллицей не найдены, использую встроенный шрифт ImGui "
-                     "(кириллица отображаться не будет).\n";
+        LogLine("[Fonts] Системные шрифты с кириллицей не найдены, использую встроенный шрифт ImGui "
+                "(кириллица отображаться не будет).");
         io.Fonts->AddFontDefault();
     }
 
@@ -130,7 +118,7 @@ int main(int argc, char** argv) {
         LogLine("[Relay] Вызов InitRelayNetworkAccess() (первичная инициализация при старте)");
         SteamNetworkingUtils()->InitRelayNetworkAccess();
     } else {
-        std::cerr << "[SteamAPI] Ошибка инициализации: " << errMsg << "\n";
+        LogLine(std::string("[SteamAPI] Ошибка инициализации: ") + errMsg);
     }
 
     SteamVpnTunnel tunnel;

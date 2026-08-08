@@ -97,6 +97,30 @@ bool WintunManager::UpdateIP(const std::string& ipAddress, const std::string& ne
 }
 
 bool WintunManager::SetAdapterIPAndMTU(NET_LUID luid, const std::string& ipAddress, const std::string& netmask, uint32_t mtu) {
+    {
+        MIB_IPINTERFACE_ROW probeRow;
+        DWORD probeStatus = ERROR_NOT_FOUND;
+        const int kMaxAttempts = 30;
+        const int kDelayMs = 100;
+        for (int attempt = 1; attempt <= kMaxAttempts; ++attempt) {
+            InitializeIpInterfaceEntry(&probeRow);
+            probeRow.InterfaceLuid = luid;
+            probeRow.Family = AF_INET;
+            probeStatus = GetIpInterfaceEntry(&probeRow);
+            if (probeStatus == NO_ERROR) {
+                break;
+            }
+            LOG_WARN("SetAdapterIPAndMTU: интерфейс ещё не готов (попытка " +
+                     std::to_string(attempt) + "/" + std::to_string(kMaxAttempts) +
+                     "), код=" + std::to_string(probeStatus));
+            Sleep(kDelayMs);
+        }
+        if (probeStatus != NO_ERROR) {
+            LOG_ERROR("SetAdapterIPAndMTU: интерфейс так и не появился в системе, код=" + std::to_string(probeStatus));
+            return false;
+        }
+    }
+
     PMIB_UNICASTIPADDRESS_TABLE table = nullptr;
     if (GetUnicastIpAddressTable(AF_INET, &table) == NO_ERROR) {
         for (ULONG i = 0; i < table->NumEntries; ++i) {
@@ -113,25 +137,43 @@ bool WintunManager::SetAdapterIPAndMTU(NET_LUID luid, const std::string& ipAddre
     ipRow.Address.Ipv4.sin_family = AF_INET;
 
     if (inet_pton(AF_INET, ipAddress.c_str(), &ipRow.Address.Ipv4.sin_addr) != 1) {
+        LOG_ERROR("SetAdapterIPAndMTU: некорректный IP-адрес '" + ipAddress + "'");
         return false;
     }
 
     ULONG mask = 0;
     UINT8 prefixLength = 24;
     if (inet_pton(AF_INET, netmask.c_str(), &mask) == 1) {
-        if (ConvertIpv4MaskToLength(ntohl(mask), &prefixLength) != NO_ERROR) {
+        DWORD convStatus = ConvertIpv4MaskToLength(ntohl(mask), &prefixLength);
+        if (convStatus != NO_ERROR) {
+            LOG_ERROR("SetAdapterIPAndMTU: не удалось преобразовать маску '" + netmask +
+                       "', код=" + std::to_string(convStatus));
             return false;
         }
+    } else {
+        LOG_WARN("SetAdapterIPAndMTU: не удалось разобрать маску '" + netmask + "', используется /24 по умолчанию");
     }
     ipRow.OnLinkPrefixLength = prefixLength;
     ipRow.DadState = IpDadStatePreferred;
 
-    DWORD status = CreateUnicastIpAddressEntry(&ipRow);
-    if (status == ERROR_OBJECT_ALREADY_EXISTS) {
-        if (SetUnicastIpAddressEntry(&ipRow) != ERROR_SUCCESS) {
-            return false;
+    DWORD status = ERROR_NOT_FOUND;
+    const int kMaxAssignAttempts = 10;
+    const int kDelayMsForAssign = 100;
+    for (int attempt = 1; attempt <= kMaxAssignAttempts; ++attempt) {
+        status = CreateUnicastIpAddressEntry(&ipRow);
+        if (status == ERROR_OBJECT_ALREADY_EXISTS) {
+            status = SetUnicastIpAddressEntry(&ipRow);
         }
-    } else if (status != ERROR_SUCCESS) {
+        if (status == ERROR_SUCCESS) {
+            break;
+        }
+        LOG_WARN("SetAdapterIPAndMTU: попытка " + std::to_string(attempt) + "/" +
+                 std::to_string(kMaxAssignAttempts) + " назначить IP не удалась, код=" + std::to_string(status));
+        Sleep(kDelayMsForAssign);
+    }
+    if (status != ERROR_SUCCESS) {
+        LOG_ERROR("SetAdapterIPAndMTU: итоговый код ошибки IPHlpApi=" + std::to_string(status) +
+                   " (см. https://learn.microsoft.com/windows/win32/api/ipmib/ns-ipmib-mib_unicastipaddress_row для расшифровки)");
         return false;
     }
 

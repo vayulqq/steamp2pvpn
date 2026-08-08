@@ -59,6 +59,13 @@ bool WintunManager::Initialize(const std::wstring& adapterName, const std::strin
     return true;
 }
 
+bool WintunManager::UpdateIP(const std::string& ipAddress, const std::string& netmask, uint32_t mtu) {
+    if (!m_Adapter || !pfnWintunGetAdapterLUID) return false;
+    NET_LUID luid;
+    pfnWintunGetAdapterLUID(m_Adapter, &luid);
+    return SetAdapterIPAndMTU(luid, ipAddress, netmask, mtu);
+}
+
 bool WintunManager::SetAdapterIPAndMTU(NET_LUID luid, const std::string& ipAddress, const std::string& netmask, uint32_t mtu) {
     MIB_UNICASTIPADDRESS_ROW ipRow;
     InitializeUnicastIpAddressEntry(&ipRow);
@@ -79,7 +86,9 @@ bool WintunManager::SetAdapterIPAndMTU(NET_LUID luid, const std::string& ipAddre
 
     DWORD status = CreateUnicastIpAddressEntry(&ipRow);
     if (status == ERROR_OBJECT_ALREADY_EXISTS) {
-        SetUnicastIpAddressEntry(&ipRow);
+        if (SetUnicastIpAddressEntry(&ipRow) != ERROR_SUCCESS) {
+            return false;
+        }
     } else if (status != ERROR_SUCCESS) {
         return false;
     }

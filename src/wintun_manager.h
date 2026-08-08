@@ -33,6 +33,7 @@ public:
     ~WintunManager();
 
     bool Initialize(const std::wstring& adapterName, const std::string& ipAddress, const std::string& netmask = "255.255.255.0", uint32_t mtu = 1200);
+    bool UpdateIP(const std::string& ipAddress, const std::string& netmask = "255.255.255.0", uint32_t mtu = 1200);
     void Shutdown();
 
     bool ReceivePacket(std::vector<uint8_t>& outBuffer);

@@ -31,7 +31,7 @@ bool WintunManager::Initialize(const std::wstring& adapterName, const std::strin
     }
 
     m_Adapter = pfnWintunCreateAdapter(adapterName.c_str(), L"SteamVPN", nullptr);
-    if (!m_Adapter) {
+    if (!m_Adapter && pfnWintunOpenAdapter) {
         m_Adapter = pfnWintunOpenAdapter(adapterName.c_str());
     }
 
@@ -41,14 +41,15 @@ bool WintunManager::Initialize(const std::wstring& adapterName, const std::strin
         return false;
     }
 
-    // Настройка IP адреса и MTU через чистый Windows IP Helper API (без netsh процесса)
     NET_LUID luid;
     pfnWintunGetAdapterLUID(m_Adapter, &luid);
-    if (!SetAdapterIPAndMTU(luid, ipAddress, mtu)) {
+    if (!SetAdapterIPAndMTU(luid, ipAddress, netmask, mtu)) {
         std::cerr << "[Wintun] Ошибка установки IP-адреса через IPHlpApi\n";
+        Shutdown();
+        return false;
     }
 
-    m_Session = pfnWintunStartSession(m_Adapter, 0x400000); // Буфер 4MB
+    m_Session = pfnWintunStartSession(m_Adapter, 0x400000);
     if (!m_Session) {
         std::cerr << "[Wintun] Ошибка открытия сессии Wintun\n";
         Shutdown();
@@ -58,28 +59,31 @@ bool WintunManager::Initialize(const std::wstring& adapterName, const std::strin
     return true;
 }
 
-bool WintunManager::SetAdapterIPAndMTU(NET_LUID luid, const std::string& ipAddress, uint32_t mtu) {
-    // 1. Установка IP-адреса
+bool WintunManager::SetAdapterIPAndMTU(NET_LUID luid, const std::string& ipAddress, const std::string& netmask, uint32_t mtu) {
     MIB_UNICASTIPADDRESS_ROW ipRow;
     InitializeUnicastIpAddressEntry(&ipRow);
     ipRow.InterfaceLuid = luid;
     ipRow.Address.Ipv4.sin_family = AF_INET;
-    
+
     if (inet_pton(AF_INET, ipAddress.c_str(), &ipRow.Address.Ipv4.sin_addr) != 1) {
         return false;
     }
 
-    ipRow.OnLinkPrefixLength = 24; // Подсеть 255.255.255.0 (/24)
+    ULONG mask = 0;
+    UINT8 prefixLength = 24;
+    if (inet_pton(AF_INET, netmask.c_str(), &mask) == 1) {
+        ConvertIpv4MaskToLength(mask, &prefixLength);
+    }
+    ipRow.OnLinkPrefixLength = prefixLength;
     ipRow.DadState = IpDadStatePreferred;
 
-    // Создаем запись адреса или обновляем существующую
     DWORD status = CreateUnicastIpAddressEntry(&ipRow);
-    if (status != ERROR_SUCCESS && status != ERROR_OBJECT_ALREADY_EXISTS) {
-        // Если уже был установлен другой IP, меняем его
+    if (status == ERROR_OBJECT_ALREADY_EXISTS) {
         SetUnicastIpAddressEntry(&ipRow);
+    } else if (status != ERROR_SUCCESS) {
+        return false;
     }
 
-    // 2. Установка MTU на интерфейсе
     MIB_IPINTERFACE_ROW ifRow;
     InitializeIpInterfaceEntry(&ifRow);
     ifRow.InterfaceLuid = luid;
@@ -106,10 +110,22 @@ void WintunManager::Shutdown() {
         FreeLibrary(m_hWintunDll);
         m_hWintunDll = nullptr;
     }
+
+    pfnWintunCreateAdapter = nullptr;
+    pfnWintunOpenAdapter = nullptr;
+    pfnWintunCloseAdapter = nullptr;
+    pfnWintunGetAdapterLUID = nullptr;
+    pfnWintunStartSession = nullptr;
+    pfnWintunEndSession = nullptr;
+    pfnWintunGetReadWaitEvent = nullptr;
+    pfnWintunReceivePacket = nullptr;
+    pfnWintunReleaseReceivePacket = nullptr;
+    pfnWintunAllocateSendPacket = nullptr;
+    pfnWintunSendPacket = nullptr;
 }
 
 bool WintunManager::ReceivePacket(std::vector<uint8_t>& outBuffer) {
-    if (!m_Session) return false;
+    if (!m_Session || !pfnWintunReceivePacket || !pfnWintunReleaseReceivePacket) return false;
 
     DWORD packetSize = 0;
     BYTE* packet = pfnWintunReceivePacket(m_Session, &packetSize);
@@ -123,7 +139,7 @@ bool WintunManager::ReceivePacket(std::vector<uint8_t>& outBuffer) {
 }
 
 bool WintunManager::SendPacket(const void* data, size_t size) {
-    if (!m_Session || size == 0) return false;
+    if (!m_Session || size == 0 || !pfnWintunAllocateSendPacket || !pfnWintunSendPacket) return false;
 
     BYTE* packet = pfnWintunAllocateSendPacket(m_Session, static_cast<DWORD>(size));
     if (!packet) {

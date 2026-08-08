@@ -9,6 +9,9 @@
 #include <vector>
 #include <cstdint>
 
+#pragma comment(lib, "iphlpapi.lib")
+#pragma comment(lib, "ws2_32.lib")
+
 typedef void* WINTUN_ADAPTER_HANDLE;
 typedef void* WINTUN_SESSION_HANDLE;
 
@@ -39,7 +42,7 @@ public:
     bool IsInitialized() const { return m_Session != nullptr; }
 
 private:
-    bool SetAdapterIPAndMTU(NET_LUID luid, const std::string& ipAddress, uint32_t mtu);
+    bool SetAdapterIPAndMTU(NET_LUID luid, const std::string& ipAddress, const std::string& netmask, uint32_t mtu);
 
     HMODULE m_hWintunDll = nullptr;
     WINTUN_ADAPTER_HANDLE m_Adapter = nullptr;

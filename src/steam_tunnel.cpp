@@ -12,7 +12,6 @@ static double GetCurrentTimeSeconds() {
 
 SteamVpnTunnel::SteamVpnTunnel() {
     s_pInstance = this;
-    m_packetBuffer.reserve(2048); // Предварительно резервируем память под MTU кадра
 }
 
 SteamVpnTunnel::~SteamVpnTunnel() {
@@ -34,19 +33,16 @@ void SteamVpnTunnel::OnSteamNetConnectionStatusChanged(SteamNetConnectionStatusC
 }
 
 void SteamVpnTunnel::HandleConnectionStatusChanged(SteamNetConnectionStatusChangedCallback_t* pInfo) {
-    // ВАЖНО: этот коллбек всегда прилетает из сетевого потока (там, где мы
-    // вызываем SteamAPI_RunCallbacks), поэтому все обращения к разделяемому
-    // состоянию (m_peers и т.п.) идут через мьютексы/атомики.
     if (!pInfo || !SteamNetworkingSockets()) return;
+
+    HSteamNetConnection hostConn = m_hostConn.load();
 
     switch (pInfo->m_info.m_eState) {
     case k_ESteamNetworkingConnectionState_Connecting:
     case k_ESteamNetworkingConnectionState_FindingRoute: {
-        if (m_isClient.load() && pInfo->m_hConn == m_hostConn) {
+        if (m_isClient.load() && pInfo->m_hConn == hostConn) {
             m_state.store(TunnelState::Connecting);
         } else if (m_isHost.load()) {
-            // Простейшая защита от бесконтрольного роста сети: не принимаем
-            // больше пиров, чем есть свободных октетов подсети.
             size_t currentPeers;
             {
                 std::lock_guard<std::mutex> lock(m_peersMutex);
@@ -66,15 +62,9 @@ void SteamVpnTunnel::HandleConnectionStatusChanged(SteamNetConnectionStatusChang
     case k_ESteamNetworkingConnectionState_Connected: {
         uint64_t remoteSteamID = pInfo->m_info.m_identityRemote.GetSteamID64();
 
-        // Проверка личности: клиент принимает "успешное подключение" только
-        // если это действительно тот SteamID, к которому он подключался.
-        // Раньше любое событие Connected на m_hostConn считалось валидным,
-        // но SteamID уже зашит в идентификаторе назначения при ConnectP2P,
-        // так что несовпадение практически невозможно без спуфинга —
-        // однако явная проверка не будет лишней и документирует инвариант.
-        if (m_isClient.load() && pInfo->m_hConn == m_hostConn && remoteSteamID != m_targetSteamID) {
+        if (m_isClient.load() && pInfo->m_hConn == hostConn && remoteSteamID != m_targetSteamID.load()) {
             SteamNetworkingSockets()->CloseConnection(pInfo->m_hConn, 0, "Identity mismatch", false);
-            m_hostConn = k_HSteamNetConnection_Invalid;
+            m_hostConn.store(k_HSteamNetConnection_Invalid);
             m_isClient.store(false);
             m_state.store(TunnelState::Failed);
             SetError("SteamID удалённой стороны не совпадает с ожидаемым");
@@ -89,7 +79,6 @@ void SteamVpnTunnel::HandleConnectionStatusChanged(SteamNetConnectionStatusChang
         if (m_isHost.load()) {
             std::lock_guard<std::mutex> lock(m_peersMutex);
 
-            // Быстрый поиск минимального свободного октета без выделения строк в куче
             bool usedIPs[256] = { false };
             for (const auto& p : m_peers) {
                 if (p.lastOctet >= VpnConfig::kMinPeerOctet && p.lastOctet <= VpnConfig::kMaxPeerOctet) {
@@ -103,7 +92,6 @@ void SteamVpnTunnel::HandleConnectionStatusChanged(SteamNetConnectionStatusChang
             }
 
             if (freeOctet > VpnConfig::kMaxPeerOctet) {
-                // Подсеть исчерпана (гонка с проверкой выше) — отклоняем.
                 SteamNetworkingSockets()->CloseConnection(pInfo->m_hConn, 0, "VPN full", false);
                 break;
             }
@@ -111,7 +99,7 @@ void SteamVpnTunnel::HandleConnectionStatusChanged(SteamNetConnectionStatusChang
             peer.lastOctet = freeOctet;
             peer.virtualIP = std::string(VpnConfig::kSubnetPrefix) + std::to_string(freeOctet);
             m_peers.push_back(peer);
-        } else if (m_isClient.load() && pInfo->m_hConn == m_hostConn) {
+        } else if (m_isClient.load() && pInfo->m_hConn == hostConn) {
             peer.lastOctet = VpnConfig::kHostOctet;
             peer.virtualIP = std::string(VpnConfig::kSubnetPrefix) + std::to_string(VpnConfig::kHostOctet);
             {
@@ -149,8 +137,8 @@ void SteamVpnTunnel::HandleConnectionStatusChanged(SteamNetConnectionStatusChang
             std::erase_if(m_peers, [pInfo](const ConnectedPeer& p) { return p.hConn == pInfo->m_hConn; });
         }
 
-        if (m_isClient.load() && pInfo->m_hConn == m_hostConn) {
-            m_hostConn = k_HSteamNetConnection_Invalid;
+        if (m_isClient.load() && pInfo->m_hConn == hostConn) {
+            m_hostConn.store(k_HSteamNetConnection_Invalid);
             m_isClient.store(false);
             m_state.store(TunnelState::Failed);
             SetError(reasonStr);
@@ -164,7 +152,6 @@ void SteamVpnTunnel::HandleConnectionStatusChanged(SteamNetConnectionStatusChang
 
 bool SteamVpnTunnel::InitHost(const std::string& virtualIP) {
     Shutdown();
-    m_localVirtualIP = virtualIP;
     SetError("");
 
     if (!SteamNetworkingSockets()) {
@@ -173,7 +160,7 @@ bool SteamVpnTunnel::InitHost(const std::string& virtualIP) {
         return false;
     }
 
-    if (!m_wintun.Initialize(L"SteamVpnAdapter", m_localVirtualIP)) {
+    if (!m_wintun.Initialize(L"SteamVpnAdapter", virtualIP)) {
         m_state.store(TunnelState::Failed);
         SetError("Не удалось создать Wintun адаптер (запустите от Администратора)");
         return false;
@@ -199,8 +186,7 @@ bool SteamVpnTunnel::InitHost(const std::string& virtualIP) {
 
 bool SteamVpnTunnel::InitClient(uint64_t targetSteamID, const std::string& virtualIP) {
     Shutdown();
-    m_localVirtualIP = virtualIP;
-    m_targetSteamID = targetSteamID;
+    m_targetSteamID.store(targetSteamID);
     SetError("");
 
     if (!SteamNetworkingSockets()) {
@@ -215,7 +201,7 @@ bool SteamVpnTunnel::InitClient(uint64_t targetSteamID, const std::string& virtu
         return false;
     }
 
-    if (!m_wintun.Initialize(L"SteamVpnAdapter", m_localVirtualIP)) {
+    if (!m_wintun.Initialize(L"SteamVpnAdapter", virtualIP)) {
         m_state.store(TunnelState::Failed);
         SetError("Не удалось создать Wintun адаптер (запустите от Администратора)");
         return false;
@@ -226,15 +212,16 @@ bool SteamVpnTunnel::InitClient(uint64_t targetSteamID, const std::string& virtu
     SteamNetworkingIdentity identity;
     identity.SetSteamID64(targetSteamID);
 
-    m_hostConn = SteamNetworkingSockets()->ConnectP2P(identity, 0, 0, nullptr);
-    if (m_hostConn == k_HSteamNetConnection_Invalid || m_hPollGroup == k_HSteamNetPollGroup_Invalid) {
+    HSteamNetConnection conn = SteamNetworkingSockets()->ConnectP2P(identity, 0, 0, nullptr);
+    if (conn == k_HSteamNetConnection_Invalid || m_hPollGroup == k_HSteamNetPollGroup_Invalid) {
         Shutdown();
         m_state.store(TunnelState::Failed);
         SetError("Ошибка инициализации P2P-подключения");
         return false;
     }
 
-    SteamNetworkingSockets()->SetConnectionPollGroup(m_hostConn, m_hPollGroup);
+    m_hostConn.store(conn);
+    SteamNetworkingSockets()->SetConnectionPollGroup(conn, m_hPollGroup);
     m_isClient.store(true);
     m_state.store(TunnelState::Connecting);
     m_connectStartTime = GetCurrentTimeSeconds();
@@ -245,20 +232,10 @@ bool SteamVpnTunnel::InitClient(uint64_t targetSteamID, const std::string& virtu
 }
 
 void SteamVpnTunnel::NetworkThreadLoop() {
-    // Сетевой поток живёт независимо от рендер-цикла ImGui/GLFW: раньше вся
-    // перекачка пакетов вызывалась из главного цикла окна, из-за чего
-    // пропускная способность VPN была искусственно привязана к FPS/VSync
-    // (glfwSwapInterval(1)) и к тому, крутится ли вообще окно (сворачивание,
-    // перетаскивание и т.д. останавливают glfwPollEvents). Здесь мы будим
-    // поток либо по приходу пакета в Wintun (событие ядра), либо по таймеру,
-    // чтобы не реже определённой частоты сервисировать SteamAPI_RunCallbacks
-    // и опрашивать PollGroup — это нужно, даже если трафика в TUN нет.
     HANDLE wintunEvent = m_wintun.GetReadWaitEvent();
 
     while (m_threadRunning.load(std::memory_order_relaxed)) {
         if (wintunEvent) {
-            // Таймаут ограничивает интервал обслуживания Steam-коллбэков и
-            // входящих P2P-сообщений даже при отсутствии локального трафика.
             WaitForSingleObject(wintunEvent, 10);
         } else {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -270,17 +247,15 @@ void SteamVpnTunnel::NetworkThreadLoop() {
 void SteamVpnTunnel::TickInternal() {
     if (m_state.load() == TunnelState::Disconnected || !SteamNetworkingSockets()) return;
 
-    // ШАГ 1: Обработка статусов и событий сети Steam
     SteamAPI_RunCallbacks();
 
-    // Таймаут подключения клиентов
+    HSteamNetConnection hostConn = m_hostConn.load();
+
     if (m_isClient.load() && m_state.load() == TunnelState::Connecting) {
         if (GetCurrentTimeSeconds() - m_connectStartTime > VpnConfig::kConnectTimeoutSeconds) {
-            // Не вызываем полный Shutdown() из сетевого потока (он делает
-            // join самого себя), просто закрываем соединение и переходим в Failed.
-            if (m_hostConn != k_HSteamNetConnection_Invalid) {
-                SteamNetworkingSockets()->CloseConnection(m_hostConn, 0, nullptr, false);
-                m_hostConn = k_HSteamNetConnection_Invalid;
+            if (hostConn != k_HSteamNetConnection_Invalid) {
+                SteamNetworkingSockets()->CloseConnection(hostConn, 0, nullptr, false);
+                m_hostConn.store(k_HSteamNetConnection_Invalid);
             }
             m_isClient.store(false);
             m_state.store(TunnelState::Failed);
@@ -292,40 +267,35 @@ void SteamVpnTunnel::TickInternal() {
     bool isHost = m_isHost.load();
     if (m_state.load() != TunnelState::Connected && !isHost) return;
 
-    // ШАГ 2: Чтение IP-пакетов из Wintun и адресная пересылка в Steam.
-    // Полный дренаж очереди Wintun за одну итерацию — без искусственного
-    // ограничения "один кадр GUI = один пакет".
-    m_packetBuffer.clear();
-    while (m_wintun.ReceivePacket(m_packetBuffer)) {
+    std::vector<uint8_t> packetBuffer;
+    packetBuffer.reserve(2048);
+
+    while (m_wintun.ReceivePacket(packetBuffer)) {
         if (isHost) {
             std::lock_guard<std::mutex> lock(m_peersMutex);
-            // 19-й байт в IPv4 заголовке — это последний октет Destination IP (192.168.137.X).
-            // Если пакет не похож на IPv4 (например IPv6) — раздать адресно
-            // мы не можем, поэтому рассылаем всем как broadcast (best effort).
-            bool looksIPv4 = m_packetBuffer.size() >= 20 && (m_packetBuffer[0] >> 4) == 4;
-            uint8_t destOctet = looksIPv4 ? m_packetBuffer[19] : static_cast<uint8_t>(VpnConfig::kBroadcastOctet);
+            bool looksIPv4 = packetBuffer.size() >= 20 && (packetBuffer[0] >> 4) == 4;
+            uint8_t destFirstOctet = looksIPv4 ? packetBuffer[16] : 0;
+            uint8_t destLastOctet = looksIPv4 ? packetBuffer[19] : static_cast<uint8_t>(VpnConfig::kBroadcastOctet);
+            bool isMulticast = looksIPv4 && (destFirstOctet >= 224 && destFirstOctet <= 239);
+            bool isBroadcast = !looksIPv4 || isMulticast || (destLastOctet == VpnConfig::kBroadcastOctet);
 
             for (const auto& peer : m_peers) {
-                if (destOctet == VpnConfig::kBroadcastOctet || peer.lastOctet == destOctet) {
+                if (isBroadcast || peer.lastOctet == destLastOctet) {
                     SteamNetworkingSockets()->SendMessageToConnection(
-                        peer.hConn, m_packetBuffer.data(), static_cast<uint32_t>(m_packetBuffer.size()),
+                        peer.hConn, packetBuffer.data(), static_cast<uint32_t>(packetBuffer.size()),
                         k_nSteamNetworkingSend_UnreliableNoDelay, nullptr);
 
-                    if (destOctet != VpnConfig::kBroadcastOctet) break; // Точечный адресат найден
+                    if (!isBroadcast) break;
                 }
             }
-        } else if (m_isClient.load() && m_hostConn != k_HSteamNetConnection_Invalid) {
+        } else if (m_isClient.load() && hostConn != k_HSteamNetConnection_Invalid) {
             SteamNetworkingSockets()->SendMessageToConnection(
-                m_hostConn, m_packetBuffer.data(), static_cast<uint32_t>(m_packetBuffer.size()),
+                hostConn, packetBuffer.data(), static_cast<uint32_t>(packetBuffer.size()),
                 k_nSteamNetworkingSend_UnreliableNoDelay, nullptr);
         }
-        m_packetBuffer.clear();
+        packetBuffer.clear();
     }
 
-    // ШАГ 3: Чтение P2P-кадров из Steam PollGroup + коммутация Клиент <-> Клиент.
-    // Дренируем очередь ПОЛНОСТЬЮ (а не максимум 32 сообщения за "кадр"),
-    // иначе при всплеске трафика остаток обрабатывался бы только на
-    // следующем цикле рендера — раньше это было узким местом.
     if (m_hPollGroup != k_HSteamNetPollGroup_Invalid) {
         SteamNetworkingMessage_t* pMsgs[32];
         int numMsgs;
@@ -339,44 +309,38 @@ void SteamVpnTunnel::TickInternal() {
                 bool looksIPv4 = size >= 20 && (data[0] >> 4) == 4;
 
                 if (isHost && looksIPv4) {
-                    uint8_t destOctet = data[19];
+                    uint8_t destFirstOctet = data[16];
+                    uint8_t destLastOctet = data[19];
+                    bool isMulticast = destFirstOctet >= 224 && destFirstOctet <= 239;
+                    bool isBroadcast = isMulticast || (destLastOctet == VpnConfig::kBroadcastOctet);
 
-                    if (destOctet == VpnConfig::kHostOctet || destOctet == VpnConfig::kBroadcastOctet) {
-                        // Пакет предназначен Хосту (или всем) — отсылаем в Wintun Хоста.
+                    if (destLastOctet == VpnConfig::kHostOctet || isBroadcast) {
                         m_wintun.SendPacket(data, size);
                     }
 
-                    // Если пакет адресован не хосту — коммутируем его между клиентами
-                    // напрямую, не гоняя через локальный TUN.
-                    if (destOctet != VpnConfig::kHostOctet) {
+                    if (destLastOctet != VpnConfig::kHostOctet || isBroadcast) {
                         std::lock_guard<std::mutex> lock(m_peersMutex);
                         for (const auto& peer : m_peers) {
-                            // Не отправляем broadcast обратно тому же соединению,
-                            // от которого он пришёл — раньше это создавало эхо
-                            // пакета себе же при destOctet == 255.
                             if (peer.hConn == sourceConn) continue;
 
-                            if (peer.lastOctet == destOctet || destOctet == VpnConfig::kBroadcastOctet) {
+                            if (isBroadcast || peer.lastOctet == destLastOctet) {
                                 SteamNetworkingSockets()->SendMessageToConnection(
                                     peer.hConn, data, static_cast<uint32_t>(size),
                                     k_nSteamNetworkingSend_UnreliableNoDelay, nullptr);
 
-                                if (destOctet != VpnConfig::kBroadcastOctet) break;
+                                if (!isBroadcast) break;
                             }
                         }
                     }
                 } else {
-                    // На Клиенте (или не-IPv4 кадр на Хосте, который мы не можем
-                    // маршрутизировать адресно) — просто пишем пришедший кадр в свой Wintun.
                     m_wintun.SendPacket(data, size);
                 }
 
                 pMsgs[i]->Release();
             }
-        } while (numMsgs == 32); // вычерпываем очередь, если пришло ровно до предела буфера
+        } while (numMsgs == 32);
     }
 
-    // Троттлинг обновления сетевой метрики Ping RTT (1 раз в секунду)
     double currentTime = GetCurrentTimeSeconds();
     if (currentTime - m_lastPingUpdateTime >= VpnConfig::kPingUpdateIntervalSeconds) {
         m_lastPingUpdateTime = currentTime;
@@ -391,12 +355,12 @@ void SteamVpnTunnel::TickInternal() {
 }
 
 void SteamVpnTunnel::Shutdown() {
-    // Останавливаем и join'им сетевой поток ДО закрытия Steam-хэндлов,
-    // чтобы TickInternal() не работал с уже уничтоженными объектами.
     m_threadRunning.store(false, std::memory_order_relaxed);
     if (m_networkThread.joinable()) {
         m_networkThread.join();
     }
+
+    HSteamNetConnection hostConn = m_hostConn.exchange(k_HSteamNetConnection_Invalid);
 
     if (SteamNetworkingSockets()) {
         if (m_hListenSocket != k_HSteamListenSocket_Invalid) {
@@ -404,9 +368,8 @@ void SteamVpnTunnel::Shutdown() {
             m_hListenSocket = k_HSteamListenSocket_Invalid;
         }
 
-        if (m_hostConn != k_HSteamNetConnection_Invalid) {
-            SteamNetworkingSockets()->CloseConnection(m_hostConn, 0, nullptr, false);
-            m_hostConn = k_HSteamNetConnection_Invalid;
+        if (hostConn != k_HSteamNetConnection_Invalid) {
+            SteamNetworkingSockets()->CloseConnection(hostConn, 0, nullptr, false);
         }
 
         if (m_hPollGroup != k_HSteamNetPollGroup_Invalid) {
@@ -419,10 +382,9 @@ void SteamVpnTunnel::Shutdown() {
         std::lock_guard<std::mutex> lock(m_peersMutex);
         m_peers.clear();
     }
-    m_packetBuffer.clear();
     m_wintun.Shutdown();
     m_isHost.store(false);
     m_isClient.store(false);
     m_state.store(TunnelState::Disconnected);
-    m_targetSteamID = 0;
+    m_targetSteamID.store(0);
 }

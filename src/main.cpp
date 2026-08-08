@@ -29,7 +29,6 @@ static std::string TimestampNow() {
 static void LogLine(const std::string& message) {
     std::string line = "[" + TimestampNow() + "] " + message;
     std::cerr << line << "\n";
-    }
 }
 
 static const char* RelayAvailabilityToString(ESteamNetworkingAvailability status) {

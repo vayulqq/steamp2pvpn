@@ -11,12 +11,10 @@
 #include <thread>
 #include <mutex>
 
-// Единое место для параметров виртуальной сети — раньше строки "192.168.137.x"
-// были продублированы в main.cpp и steam_tunnel.cpp, что легко рассинхронизировать.
 namespace VpnConfig {
     constexpr const char* kHostVirtualIP   = "192.168.137.1";
     constexpr const char* kClientVirtualIP = "192.168.137.2";
-    constexpr const char* kSubnetPrefix    = "192.168.137."; // + октет
+    constexpr const char* kSubnetPrefix    = "192.168.137.";
     constexpr int         kHostOctet       = 1;
     constexpr int         kBroadcastOctet  = 255;
     constexpr int         kMinPeerOctet    = 2;
@@ -45,33 +43,22 @@ public:
     SteamVpnTunnel();
     ~SteamVpnTunnel();
 
-    // Запускаются из UI-потока. Сами по себе быстрые (без блокировок на сеть),
-    // после успешной инициализации поднимают фоновый сетевой поток.
     bool InitHost(const std::string& virtualIP = VpnConfig::kHostVirtualIP);
     bool InitClient(uint64_t targetSteamID, const std::string& virtualIP = VpnConfig::kClientVirtualIP);
     void Shutdown();
 
-    // Больше не требуется вызывать из основного цикла рендера — сеть крутится
-    // в своём потоке. Метод оставлен как no-op для обратной совместимости.
-    void Tick() {}
-
     bool IsHost() const { return m_isHost.load(std::memory_order_relaxed); }
     bool IsClient() const { return m_isClient.load(std::memory_order_relaxed); }
-    bool IsActive() const {
-        TunnelState s = GetState();
-        return s == TunnelState::Connected || s == TunnelState::Connecting || IsHost();
-    }
+    bool IsThreadRunning() const { return m_threadRunning.load(std::memory_order_relaxed); }
 
     TunnelState GetState() const { return m_state.load(std::memory_order_relaxed); }
-    uint64_t GetTargetSteamID() const { return m_targetSteamID; }
+    uint64_t GetTargetSteamID() const { return m_targetSteamID.load(std::memory_order_relaxed); }
 
     std::string GetLastError() const {
         std::lock_guard<std::mutex> lock(m_errorMutex);
         return m_lastError;
     }
 
-    // Возвращает СНИМОК списка пиров — безопасно вызывать из UI-потока,
-    // пока сетевой поток параллельно модифицирует оригинал под мьютексом.
     std::vector<ConnectedPeer> GetPeers() const {
         std::lock_guard<std::mutex> lock(m_peersMutex);
         return m_peers;
@@ -83,15 +70,13 @@ private:
     void HandleConnectionStatusChanged(SteamNetConnectionStatusChangedCallback_t* pInfo);
     void SetError(const std::string& err);
 
-    // Тело фонового сетевого потока: обслуживает SteamAPI_RunCallbacks,
-    // перекачку пакетов Wintun<->Steam и троттлинг пинга. Не зависит от FPS окна.
     void NetworkThreadLoop();
     void TickInternal();
 
     WintunManager m_wintun;
     HSteamListenSocket m_hListenSocket = k_HSteamListenSocket_Invalid;
     HSteamNetPollGroup m_hPollGroup = k_HSteamNetPollGroup_Invalid;
-    HSteamNetConnection m_hostConn = k_HSteamNetConnection_Invalid;
+    std::atomic<HSteamNetConnection> m_hostConn{k_HSteamNetConnection_Invalid};
 
     std::atomic<bool> m_isHost{false};
     std::atomic<bool> m_isClient{false};
@@ -100,16 +85,12 @@ private:
     mutable std::mutex m_errorMutex;
     std::string m_lastError;
 
-    uint64_t m_targetSteamID = 0;
+    std::atomic<uint64_t> m_targetSteamID{0};
     double m_connectStartTime = 0.0;
     double m_lastPingUpdateTime = 0.0;
 
-    std::string m_localVirtualIP;
-
     mutable std::mutex m_peersMutex;
     std::vector<ConnectedPeer> m_peers;
-
-    std::vector<uint8_t> m_packetBuffer; // Переиспользуемый буфер, живёт только в сетевом потоке
 
     std::thread m_networkThread;
     std::atomic<bool> m_threadRunning{false};

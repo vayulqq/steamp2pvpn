@@ -64,30 +64,3 @@ private:
     WINTUN_ALLOCATE_SEND_PACKET_FUNC pfnWintunAllocateSendPacket = nullptr;
     WINTUN_SEND_PACKET_FUNC pfnWintunSendPacket = nullptr;
 };
-    void Shutdown();
-
-    bool ReceivePacket(std::vector<uint8_t>& outBuffer);
-    bool SendPacket(const void* data, size_t size);
-    HANDLE GetReadWaitEvent() const;
-
-    bool IsInitialized() const { return m_Session != nullptr; }
-
-private:
-    bool SetAdapterIPAndMTU(NET_LUID luid, const std::string& ipAddress, const std::string& netmask, uint32_t mtu);
-
-    HMODULE m_hWintunDll = nullptr;
-    WINTUN_ADAPTER_HANDLE m_Adapter = nullptr;
-    WINTUN_SESSION_HANDLE m_Session = nullptr;
-
-    WINTUN_CREATE_ADAPTER_FUNC pfnWintunCreateAdapter = nullptr;
-    WINTUN_OPEN_ADAPTER_FUNC pfnWintunOpenAdapter = nullptr;
-    WINTUN_CLOSE_ADAPTER_FUNC pfnWintunCloseAdapter = nullptr;
-    WINTUN_GET_ADAPTER_LUID_FUNC pfnWintunGetAdapterLUID = nullptr;
-    WINTUN_START_SESSION_FUNC pfnWintunStartSession = nullptr;
-    WINTUN_END_SESSION_FUNC pfnWintunEndSession = nullptr;
-    WINTUN_GET_READ_WAIT_EVENT_FUNC pfnWintunGetReadWaitEvent = nullptr;
-    WINTUN_RECEIVE_PACKET_FUNC pfnWintunReceivePacket = nullptr;
-    WINTUN_RELEASE_RECEIVE_PACKET_FUNC pfnWintunReleaseReceivePacket = nullptr;
-    WINTUN_ALLOCATE_SEND_PACKET_FUNC pfnWintunAllocateSendPacket = nullptr;
-    WINTUN_SEND_PACKET_FUNC pfnWintunSendPacket = nullptr;
-};
